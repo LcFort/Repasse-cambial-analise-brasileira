@@ -1,0 +1,650 @@
+---
+title: "Outputs do Programa Econométrico"
+subtitle: "Pass-through cambial e política monetária no Brasil — VAR/VECM"
+author: |
+  | Alunos: Guilherme Santos de Carvalho e Lucas Fortuna Arantes Junqueira
+  | Professora: Susan Schommer
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: true
+    number_sections: false
+fontsize: 10pt
+geometry: margin=1in
+date: "Maio de 2026"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  include = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center",
+  fig.width = 10,
+  fig.height = 6,
+  out.width = "95%"
+)
+
+options(scipen = 999)
+
+libs <- c("dplyr", "readxl", "urca", "vars", "lmtest", "knitr", "ggplot2")
+invisible(lapply(libs, function(pkg) {
+  if (!requireNamespace(pkg, quietly = TRUE)) install.packages(pkg)
+  suppressPackageStartupMessages(library(pkg, character.only = TRUE))
+}))
+
+if (file.exists("_master.R")) {
+  source("_master.R")
+}
+
+if (!exists("pasta_input")) pasta_input <- "input"
+if (!exists("DATA_INICIAL")) DATA_INICIAL <- as.Date("2003-01-01")
+if (!exists("DATA_FINAL"))   DATA_FINAL   <- as.Date("2025-12-01")
+if (!exists("ORDEM_ECON"))   ORDEM_ECON   <- c("log_cambio", "log_ipca_indice", "selic")
+if (!exists("ORDEM_CONT"))   ORDEM_CONT   <- c("selic", "log_ipca_indice", "log_cambio")
+if (!exists("HORIZONTE_IR")) HORIZONTE_IR <- 24
+if (!exists("N_BOOT"))       N_BOOT       <- 500
+```
+
+# 1. Base e transformações
+
+```{r dados}
+# IPCA — índice histórico IBGE/SIDRA, série 1737
+ipca <- readxl::read_xlsx(file.path(pasta_input, "ipca_sidra_1737.xlsx"))
+names(ipca) <- c("data", "mes", "valor")
+ipca$data  <- as.Date(ipca$data)
+ipca$valor <- as.numeric(ipca$valor)
+ipca <- ipca %>%
+  mutate(data = as.Date(format(data, "%Y-%m-01"))) %>%
+  filter(!is.na(data), !is.na(valor),
+         data >= DATA_INICIAL, data <= DATA_FINAL)
+
+# Câmbio R$/US$ — BCB/SGS 3698, mensal
+cambio_raw <- read.csv2(file.path(pasta_input, "cambio_sgs_3698.csv"),
+                        quote = "\"", stringsAsFactors = FALSE)
+names(cambio_raw) <- c("data", "valor")
+cambio_raw$data  <- as.Date(cambio_raw$data, format = "%d/%m/%Y")
+cambio_raw$valor <- as.numeric(gsub(",", ".", cambio_raw$valor))
+cambio <- cambio_raw %>%
+  filter(!is.na(data), !is.na(valor),
+         data >= DATA_INICIAL, data <= DATA_FINAL)
+
+# Selic meta — BCB/SGS 432, diária para mensal pelo último valor do mês
+selic_raw <- read.csv2(file.path(pasta_input, "selic_sgs_432.csv"),
+                       stringsAsFactors = FALSE)
+names(selic_raw) <- c("data", "valor")
+selic_raw$data  <- as.Date(selic_raw$data, format = "%d/%m/%Y")
+selic_raw$valor <- as.numeric(gsub(",", ".", selic_raw$valor))
+selic_raw <- selic_raw %>% filter(!is.na(data), !is.na(valor))
+selic_raw$mes <- format(selic_raw$data, "%Y-%m-01")
+selic <- selic_raw %>%
+  group_by(mes) %>%
+  summarise(valor = dplyr::last(valor), .groups = "drop") %>%
+  mutate(data = as.Date(mes)) %>%
+  filter(data >= DATA_INICIAL, data <= DATA_FINAL) %>%
+  dplyr::select(data, valor)
+
+# Base alinhada
+df <- Reduce(function(a, b) merge(a, b, by = "data", all = FALSE),
+             list(
+               data.frame(data = ipca$data,   ipca_indice = ipca$valor),
+               data.frame(data = cambio$data, cambio      = cambio$valor),
+               data.frame(data = selic$data,  selic       = selic$valor)
+             ))
+
+# Transformações
+df$log_ipca_indice <- log(df$ipca_indice)
+df$log_cambio      <- log(df$cambio)
+
+cat("Observações:", nrow(df), "\n")
+cat("Período:", format(min(df$data)), "a", format(max(df$data)), "\n")
+```
+
+```{r estatisticas-descritivas}
+vars_transf <- df[, c("log_ipca_indice", "log_cambio", "selic")]
+estat <- data.frame(
+  variavel = names(vars_transf),
+  n        = sapply(vars_transf, length),
+  media    = round(sapply(vars_transf, mean), 4),
+  dp       = round(sapply(vars_transf, sd),   4),
+  min      = round(sapply(vars_transf, min),  4),
+  max      = round(sapply(vars_transf, max),  4)
+)
+knitr::kable(estat, caption = "Estatísticas descritivas das séries transformadas",
+             row.names = FALSE)
+```
+
+# 2. Gráficos em nível e primeira diferença
+
+```{r graficos-nivel-diferenca, fig.width=10, fig.height=8}
+par(mfrow = c(3, 2), mar = c(4, 4, 3, 1))
+
+plot(df$data, df$log_ipca_indice, type = "l", lwd = 1.3,
+     main = "log(IPCA-índice) — nível", xlab = "", ylab = "valor")
+plot(df$data[-1], diff(df$log_ipca_indice), type = "l", lwd = 1,
+     main = "log(IPCA-índice) — 1ª diferença", xlab = "", ylab = "delta")
+abline(h = 0, lty = 2)
+
+plot(df$data, df$log_cambio, type = "l", lwd = 1.3,
+     main = "log(Câmbio R$/US$) — nível", xlab = "", ylab = "valor")
+plot(df$data[-1], diff(df$log_cambio), type = "l", lwd = 1,
+     main = "log(Câmbio R$/US$) — 1ª diferença", xlab = "", ylab = "delta")
+abline(h = 0, lty = 2)
+
+plot(df$data, df$selic, type = "l", lwd = 1.3,
+     main = "Selic meta (% a.a.) — nível", xlab = "", ylab = "valor")
+plot(df$data[-1], diff(df$selic), type = "l", lwd = 1,
+     main = "Selic meta — 1ª diferença", xlab = "", ylab = "delta")
+abline(h = 0, lty = 2)
+```
+
+# 3. Testes ADF
+
+```{r adf}
+s_ipca   <- df$log_ipca_indice
+s_cambio <- df$log_cambio
+s_selic  <- df$selic
+
+adf_ipca_n      <- ur.df(s_ipca,   type = "trend", selectlags = "AIC")
+adf_cam_n       <- ur.df(s_cambio, type = "trend", selectlags = "AIC")
+adf_sel_n_trend <- ur.df(s_selic,  type = "trend", selectlags = "AIC")
+adf_sel_n       <- ur.df(s_selic,  type = "drift", selectlags = "AIC")
+
+adf_ipca_d <- ur.df(diff(s_ipca),   type = "drift", selectlags = "AIC")
+adf_cam_d  <- ur.df(diff(s_cambio), type = "drift", selectlags = "AIC")
+adf_sel_d  <- ur.df(diff(s_selic),  type = "drift", selectlags = "AIC")
+
+extrair_adf <- function(modelo, nome) {
+  tipo <- modelo@model
+  tau <- ifelse(tipo == "none", "tau1",
+                ifelse(tipo == "drift", "tau2", "tau3"))
+  stat  <- as.numeric(modelo@teststat["statistic", tau])
+  cvals <- modelo@cval[tau, ]
+  data.frame(
+    Serie = nome,
+    Tipo = tipo,
+    Estatistica = round(stat, 4),
+    `CV 1%` = round(cvals["1pct"], 3),
+    `CV 5%` = round(cvals["5pct"], 3),
+    `CV 10%` = round(cvals["10pct"], 3),
+    `Rejeita H0 5%` = ifelse(stat < cvals["5pct"], "SIM", "não"),
+    check.names = FALSE
+  )
+}
+
+tabela_adf <- rbind(
+  extrair_adf(adf_ipca_n,      "log(IPCA) — nível (trend)"),
+  extrair_adf(adf_cam_n,       "log(Câmbio) — nível (trend)"),
+  extrair_adf(adf_sel_n_trend, "Selic — nível (trend)"),
+  extrair_adf(adf_sel_n,       "Selic — nível (drift; complementar)"),
+  extrair_adf(adf_ipca_d,      "log(IPCA) — 1ª dif."),
+  extrair_adf(adf_cam_d,       "log(Câmbio) — 1ª dif."),
+  extrair_adf(adf_sel_d,       "Selic — 1ª dif.")
+)
+
+knitr::kable(tabela_adf, caption = "Teste ADF — séries em nível e 1ª diferença",
+             row.names = FALSE)
+```
+
+```{r adf-summaries, results='markup'}
+cat("--- ADF log(IPCA) nível ---\n")
+summary(adf_ipca_n)
+cat("\n--- ADF log(Câmbio) nível ---\n")
+summary(adf_cam_n)
+cat("\n--- ADF Selic nível — trend ---\n")
+summary(adf_sel_n_trend)
+cat("\n--- ADF Selic nível — drift complementar ---\n")
+summary(adf_sel_n)
+cat("\n--- ADF log(IPCA) 1ª diferença ---\n")
+summary(adf_ipca_d)
+cat("\n--- ADF log(Câmbio) 1ª diferença ---\n")
+summary(adf_cam_d)
+cat("\n--- ADF Selic 1ª diferença ---\n")
+summary(adf_sel_d)
+```
+
+# 4. Testes Zivot-Andrews
+
+```{r zivot-andrews}
+za_ipca_n <- ur.za(ts(s_ipca),   model = "both", lag = NULL)
+za_cam_n  <- ur.za(ts(s_cambio), model = "both", lag = NULL)
+za_sel_n  <- ur.za(ts(s_selic),  model = "both", lag = NULL)
+
+za_ipca_d <- ur.za(ts(diff(s_ipca)),   model = "both", lag = NULL)
+za_cam_d  <- ur.za(ts(diff(s_cambio)), model = "both", lag = NULL)
+za_sel_d  <- ur.za(ts(diff(s_selic)),  model = "both", lag = NULL)
+
+extrair_za <- function(modelo, nome, datas) {
+  bp <- modelo@bpoint
+  stat <- modelo@teststat
+  cv5 <- -5.08
+  data.frame(
+    Serie = nome,
+    Estatistica = round(stat, 4),
+    `CV 5%` = cv5,
+    Quebra = ifelse(bp <= length(datas), format(datas[bp]), "—"),
+    `Rejeita H0 5%` = ifelse(stat < cv5, "SIM", "não"),
+    check.names = FALSE
+  )
+}
+
+tabela_za_n <- rbind(
+  extrair_za(za_ipca_n, "log(IPCA) — nível",  df$data),
+  extrair_za(za_cam_n,  "log(Câmbio) — nível", df$data),
+  extrair_za(za_sel_n,  "Selic — nível",        df$data)
+)
+
+tabela_za_d <- rbind(
+  extrair_za(za_ipca_d, "log(IPCA) — 1ª dif.",   df$data[-1]),
+  extrair_za(za_cam_d,  "log(Câmbio) — 1ª dif.", df$data[-1]),
+  extrair_za(za_sel_d,  "Selic — 1ª dif.",       df$data[-1])
+)
+
+knitr::kable(tabela_za_n, caption = "Teste Zivot-Andrews — séries em nível",
+             row.names = FALSE)
+knitr::kable(tabela_za_d, caption = "Teste Zivot-Andrews — séries em 1ª diferença",
+             row.names = FALSE)
+```
+
+```{r zivot-andrews-summaries, results='markup'}
+cat("--- ZA log(IPCA) nível ---\n")
+summary(za_ipca_n)
+cat("\n--- ZA log(Câmbio) nível ---\n")
+summary(za_cam_n)
+cat("\n--- ZA Selic nível ---\n")
+summary(za_sel_n)
+cat("\n--- ZA log(IPCA) 1ª diferença ---\n")
+summary(za_ipca_d)
+cat("\n--- ZA log(Câmbio) 1ª diferença ---\n")
+summary(za_cam_d)
+cat("\n--- ZA Selic 1ª diferença ---\n")
+summary(za_sel_d)
+```
+
+# 5. Engle-Granger
+
+```{r engle-granger}
+Y <- data.frame(
+  log_ipca_indice = s_ipca,
+  log_cambio      = s_cambio,
+  selic           = s_selic
+)
+
+eg_ipca   <- lm(log_ipca_indice ~ log_cambio + selic, data = Y)
+eg_cambio <- lm(log_cambio ~ log_ipca_indice + selic, data = Y)
+eg_selic  <- lm(selic ~ log_ipca_indice + log_cambio, data = Y)
+
+adf_eg_ipca <- ur.df(residuals(eg_ipca),   type = "none", selectlags = "AIC")
+adf_eg_cam  <- ur.df(residuals(eg_cambio), type = "none", selectlags = "AIC")
+adf_eg_sel  <- ur.df(residuals(eg_selic),  type = "none", selectlags = "AIC")
+
+cv_eg <- c("1pct" = -4.29, "5pct" = -3.74, "10pct" = -3.45)
+
+extrair_eg <- function(modelo, nome) {
+  stat <- as.numeric(modelo@teststat["statistic", "tau1"])
+  data.frame(
+    `Variável dependente` = nome,
+    Estatistica = round(stat, 4),
+    `CV 1% MacKinnon` = cv_eg["1pct"],
+    `CV 5% MacKinnon` = cv_eg["5pct"],
+    `CV 10% MacKinnon` = cv_eg["10pct"],
+    `Rejeita H0 5%` = ifelse(stat < cv_eg["5pct"], "SIM", "não"),
+    check.names = FALSE
+  )
+}
+
+tabela_eg <- rbind(
+  extrair_eg(adf_eg_ipca, "log(IPCA)"),
+  extrair_eg(adf_eg_cam,  "log(Câmbio)"),
+  extrair_eg(adf_eg_sel,  "Selic")
+)
+
+knitr::kable(tabela_eg,
+             caption = "Teste de Engle-Granger — ADF nos resíduos com valores críticos de MacKinnon",
+             row.names = FALSE)
+```
+
+```{r engle-granger-summaries, results='markup'}
+cat("--- Regressão EG: log(IPCA) dependente ---\n")
+summary(eg_ipca)
+cat("\n--- ADF nos resíduos: log(IPCA) dependente ---\n")
+summary(adf_eg_ipca)
+
+cat("\n--- Regressão EG: log(Câmbio) dependente ---\n")
+summary(eg_cambio)
+cat("\n--- ADF nos resíduos: log(Câmbio) dependente ---\n")
+summary(adf_eg_cam)
+
+cat("\n--- Regressão EG: Selic dependente ---\n")
+summary(eg_selic)
+cat("\n--- ADF nos resíduos: Selic dependente ---\n")
+summary(adf_eg_sel)
+```
+
+# 6. Johansen
+
+```{r johansen}
+var_sel <- VARselect(Y, lag.max = 12, type = "const")
+K_opt <- max(as.integer(var_sel$selection["AIC(n)"]), 2)
+
+jo_trace <- ca.jo(Y, type = "trace", K = K_opt,
+                  ecdet = "const", spec = "longrun")
+jo_eigen <- ca.jo(Y, type = "eigen", K = K_opt,
+                  ecdet = "const", spec = "longrun")
+
+rank_trace_5 <- sum(jo_trace@teststat > jo_trace@cval[, "5pct"])
+rank_eigen_5 <- sum(jo_eigen@teststat > jo_eigen@cval[, "5pct"])
+
+johansen_tabela <- function(obj, nome) {
+  data.frame(
+    Teste = nome,
+    Hipotese = rownames(obj@cval),
+    Estatistica = round(obj@teststat, 4),
+    `CV 10%` = obj@cval[, "10pct"],
+    `CV 5%` = obj@cval[, "5pct"],
+    `CV 1%` = obj@cval[, "1pct"],
+    `Rejeita H0 5%` = ifelse(obj@teststat > obj@cval[, "5pct"], "SIM", "não"),
+    check.names = FALSE
+  )
+}
+
+cat("Defasagem selecionada pelo AIC para Johansen: K =", K_opt, "\n")
+cat("Rank pelo traço a 5%:", rank_trace_5, "\n")
+cat("Rank pelo máximo autovalor a 5%:", rank_eigen_5, "\n")
+
+knitr::kable(johansen_tabela(jo_trace, "Traço"),
+             caption = "Johansen — teste por traço", row.names = FALSE)
+knitr::kable(johansen_tabela(jo_eigen, "Máximo autovalor"),
+             caption = "Johansen — teste por máximo autovalor", row.names = FALSE)
+```
+
+```{r johansen-summaries, results='markup'}
+cat("--- Seleção de defasagem para VAR/Johansen ---\n")
+print(var_sel$selection)
+cat("\n--- Johansen por traço ---\n")
+summary(jo_trace)
+cat("\n--- Johansen por máximo autovalor ---\n")
+summary(jo_eigen)
+```
+
+# 7. VAR em primeira diferença
+
+```{r var}
+dY <- data.frame(
+  log_cambio      = diff(s_cambio),
+  log_ipca_indice = diff(s_ipca),
+  selic           = diff(s_selic)
+)
+
+dY_econ <- dY[, ORDEM_ECON]
+sel_var <- VARselect(dY_econ, lag.max = 12, type = "const")
+p_var <- max(as.integer(sel_var$selection["AIC(n)"]), 1)
+var_fit <- VAR(dY_econ, p = p_var, type = "const")
+
+cat("Ordem das variáveis no VAR:", paste(colnames(dY_econ), collapse = " -> "), "\n")
+cat("Defasagem selecionada pelo AIC: p =", p_var, "\n")
+cat("Critérios de informação:\n")
+print(sel_var$selection)
+```
+
+```{r var-summary, results='markup'}
+summary(var_fit)
+```
+
+# 8. IRFs — duas ordenações
+
+## 8.1 Ordenação econômica: câmbio → IPCA → Selic
+
+```{r irf-ordenacao-economica, fig.width=10, fig.height=8}
+set.seed(123)
+irf_econ <- irf(var_fit,
+                n.ahead = HORIZONTE_IR,
+                ortho = TRUE,
+                boot = TRUE,
+                runs = N_BOOT,
+                ci = 0.95)
+plot(irf_econ,
+     main = "IRF ortogonalizada — ordenação econômica: câmbio → IPCA → Selic")
+```
+
+## 8.2 Ordenação contrária: Selic → IPCA → câmbio
+
+```{r irf-ordenacao-contraria, fig.width=10, fig.height=8}
+dY_cont <- dY[, ORDEM_CONT]
+var_cont <- VAR(dY_cont, p = p_var, type = "const")
+
+set.seed(123)
+irf_cont <- irf(var_cont,
+                n.ahead = HORIZONTE_IR,
+                ortho = TRUE,
+                boot = TRUE,
+                runs = N_BOOT,
+                ci = 0.95)
+plot(irf_cont,
+     main = "IRF ortogonalizada — ordenação contrária: Selic → IPCA → câmbio")
+```
+
+# 9. VECM
+
+```{r vecm}
+rank_coint <- max(sum(jo_trace@teststat > jo_trace@cval[, "5pct"]), 1)
+vecm_fit <- cajorls(jo_trace, r = rank_coint)
+
+cat("Rank de cointegração adotado:", rank_coint, "\n")
+cat("\n--- Vetor(es) de cointegração — beta ---\n")
+print(round(vecm_fit$beta, 4))
+
+cat("\n--- Coeficientes de ajustamento — alpha ---\n")
+alpha <- coef(vecm_fit$rlm)[1:rank_coint, , drop = FALSE]
+print(round(alpha, 4))
+```
+
+```{r vecm-summary, results='markup'}
+summary(vecm_fit$rlm)
+```
+
+## 9.1 IRF acumulada do VECM via `vec2var`
+
+```{r irf-vecm, fig.width=10, fig.height=6}
+Y_econ_nivel <- Y[, ORDEM_ECON]
+
+jo_trace_econ <- ca.jo(Y_econ_nivel, type = "trace", K = K_opt,
+                       ecdet = "const", spec = "longrun")
+vecm_var_econ <- vec2var(jo_trace_econ, r = rank_coint)
+
+set.seed(123)
+irf_vecm <- irf(vecm_var_econ,
+                impulse = "log_cambio",
+                response = c("log_ipca_indice", "selic"),
+                n.ahead = HORIZONTE_IR,
+                ortho = TRUE,
+                boot = TRUE,
+                runs = N_BOOT,
+                ci = 0.95,
+                cumulative = TRUE)
+plot(irf_vecm, main = "IRF acumulada do VECM — choque em câmbio")
+```
+
+# 10. Testes de especificação e diagnóstico
+
+## 10.1 Diagnósticos do VAR
+
+```{r diagnosticos-var}
+pt_test <- serial.test(var_fit, lags.pt = 12, type = "PT.adjusted")
+norm_test <- normality.test(var_fit)
+arch_var <- tryCatch(arch.test(var_fit, lags.multi = 5, multivariate.only = TRUE),
+                     error = function(e) NULL)
+
+resid_var <- residuals(var_fit)
+fitted_var <- fitted(var_fit)
+bp_results <- lapply(seq_len(ncol(resid_var)), function(i) {
+  lmtest::bptest(lm(resid_var[, i]^2 ~ fitted_var[, i] + I(fitted_var[, i]^2)))
+})
+names(bp_results) <- colnames(resid_var)
+
+extrair_stat <- function(x) {
+  if (inherits(x, "htest")) return(as.numeric(x$statistic[1]))
+
+  if (!is.null(x$JB)) {
+    jb <- x$JB
+    if (inherits(jb, "htest")) return(as.numeric(jb$statistic[1]))
+    if (!is.null(jb$statistic)) return(as.numeric(jb$statistic[1]))
+    if (is.data.frame(jb) || is.matrix(jb)) {
+      cn <- tolower(colnames(jb))
+      idx <- grep("stat|chi", cn)[1]
+      if (!is.na(idx)) return(as.numeric(jb[1, idx]))
+    }
+  }
+
+  if (!is.null(x$statistic)) return(as.numeric(x$statistic[1]))
+  if (!is.null(x$teststat))  return(as.numeric(x$teststat[1]))
+  NA_real_
+}
+
+extrair_pval <- function(x) {
+  if (inherits(x, "htest")) return(as.numeric(x$p.value[1]))
+
+  if (!is.null(x$JB)) {
+    jb <- x$JB
+    if (inherits(jb, "htest")) return(as.numeric(jb$p.value[1]))
+    if (!is.null(jb$p.value)) return(as.numeric(jb$p.value[1]))
+    if (is.data.frame(jb) || is.matrix(jb)) {
+      cn <- tolower(colnames(jb))
+      idx <- grep("p", cn)[1]
+      if (!is.na(idx)) return(as.numeric(jb[1, idx]))
+    }
+  }
+
+  if (!is.null(x$p.value)) return(as.numeric(x$p.value[1]))
+  NA_real_
+}
+
+diag_df <- data.frame(
+  Teste = c("Portmanteau ajustado — lags=12",
+            "Jarque-Bera multivariado",
+            "ARCH multivariado — lags=5",
+            paste0("Breusch-Pagan — ", names(bp_results)),
+            "Estabilidade — max raiz"),
+  Estatistica = c(
+    round(extrair_stat(pt_test$serial), 4),
+    round(extrair_stat(norm_test$jb.mul), 4),
+    ifelse(is.null(arch_var), NA, round(extrair_stat(arch_var$arch.mul), 4)),
+    round(sapply(bp_results, function(x) as.numeric(x$statistic)), 4),
+    round(max(roots(var_fit)), 4)
+  ),
+  `p-valor` = c(
+    round(extrair_pval(pt_test$serial), 4),
+    round(extrair_pval(norm_test$jb.mul), 4),
+    ifelse(is.null(arch_var), NA, round(extrair_pval(arch_var$arch.mul), 4)),
+    round(sapply(bp_results, function(x) as.numeric(x$p.value)), 4),
+    NA
+  ),
+  H0 = c("Resíduos são ruído branco",
+         "Resíduos normais",
+         "Ausência de efeitos ARCH",
+         rep("Homocedasticidade", length(bp_results)),
+         "Estável se max|raiz| < 1"),
+  check.names = FALSE
+)
+
+knitr::kable(diag_df, caption = "Diagnósticos do VAR", row.names = FALSE)
+```
+
+```{r diagnosticos-var-prints, results='markup'}
+cat("--- Portmanteau VAR ---\n")
+print(pt_test$serial)
+cat("\n--- Jarque-Bera VAR ---\n")
+print(norm_test$jb.mul)
+cat("\n--- ARCH VAR ---\n")
+if (!is.null(arch_var)) print(arch_var$arch.mul) else cat("arch.test não disponível para este objeto.\n")
+cat("\n--- Breusch-Pagan VAR por equação ---\n")
+for (nm in names(bp_results)) {
+  cat("\n", nm, "\n", sep = "")
+  print(bp_results[[nm]])
+}
+cat("\n--- Raízes VAR ---\n")
+print(round(roots(var_fit), 4))
+cat("\nSistema VAR estável:", all(roots(var_fit) < 1), "\n")
+```
+
+## 10.2 Diagnósticos do VECM
+
+```{r diagnosticos-vecm}
+vecm_as_var <- vec2var(jo_trace, r = rank_coint)
+
+pt_vecm <- serial.test(vecm_as_var, lags.pt = 12, type = "PT.adjusted")
+norm_vecm <- normality.test(vecm_as_var)
+
+resid_vecm <- residuals(vecm_as_var)
+fitted_vecm <- fitted(vecm_as_var)
+bp_vecm <- lapply(seq_len(ncol(resid_vecm)), function(i) {
+  lmtest::bptest(lm(resid_vecm[, i]^2 ~ fitted_vecm[, i] + I(fitted_vecm[, i]^2)))
+})
+names(bp_vecm) <- colnames(resid_vecm)
+
+A_mats <- vecm_as_var$A
+K_vecm <- vecm_as_var$K
+p_vecm <- vecm_as_var$p
+companion <- matrix(0, nrow = K_vecm * p_vecm, ncol = K_vecm * p_vecm)
+for (i in seq_len(p_vecm)) {
+  companion[1:K_vecm, ((i - 1) * K_vecm + 1):(i * K_vecm)] <- A_mats[[i]]
+}
+if (p_vecm > 1) {
+  companion[(K_vecm + 1):(K_vecm * p_vecm), 1:(K_vecm * (p_vecm - 1))] <- diag(K_vecm * (p_vecm - 1))
+}
+raizes_vecm <- Mod(eigen(companion, only.values = TRUE)$values)
+
+# Robustez: VECM com K = 6
+jo_trace_6 <- ca.jo(Y, type = "trace", K = 6,
+                    ecdet = "const", spec = "longrun")
+vecm6_as_var <- vec2var(jo_trace_6, r = rank_coint)
+pt_vecm6 <- serial.test(vecm6_as_var, lags.pt = 12, type = "PT.adjusted")
+
+diag_vecm_df <- data.frame(
+  Teste = c("Portmanteau ajustado — lags=12",
+            "Portmanteau robustez — K=6",
+            "Jarque-Bera multivariado",
+            paste0("Breusch-Pagan — ", names(bp_vecm)),
+            "Estabilidade — max raiz"),
+  Estatistica = c(
+    round(extrair_stat(pt_vecm$serial), 4),
+    round(extrair_stat(pt_vecm6$serial), 4),
+    round(extrair_stat(norm_vecm$jb.mul), 4),
+    round(sapply(bp_vecm, function(x) as.numeric(x$statistic)), 4),
+    round(max(raizes_vecm), 4)
+  ),
+  `p-valor` = c(
+    round(extrair_pval(pt_vecm$serial), 4),
+    round(extrair_pval(pt_vecm6$serial), 4),
+    round(extrair_pval(norm_vecm$jb.mul), 4),
+    round(sapply(bp_vecm, function(x) as.numeric(x$p.value)), 4),
+    NA
+  ),
+  H0 = c("Resíduos são ruído branco",
+         "Resíduos são ruído branco",
+         "Resíduos normais",
+         rep("Homocedasticidade", length(bp_vecm)),
+         "Estável se max|raiz| < 1"),
+  check.names = FALSE
+)
+
+knitr::kable(diag_vecm_df, caption = "Diagnósticos do VECM", row.names = FALSE)
+```
+
+```{r diagnosticos-vecm-prints, results='markup'}
+cat("--- Portmanteau VECM ---\n")
+print(pt_vecm$serial)
+cat("\n--- Portmanteau VECM robustez K=6 ---\n")
+print(pt_vecm6$serial)
+cat("\n--- Jarque-Bera VECM ---\n")
+print(norm_vecm$jb.mul)
+cat("\n--- Breusch-Pagan VECM por equação ---\n")
+for (nm in names(bp_vecm)) {
+  cat("\n", nm, "\n", sep = "")
+  print(bp_vecm[[nm]])
+}
+cat("\n--- Raízes VECM ---\n")
+print(round(sort(raizes_vecm, decreasing = TRUE), 4))
+cat("\nSistema VECM com todas as raízes < 1:", all(raizes_vecm < 1), "\n")
+```

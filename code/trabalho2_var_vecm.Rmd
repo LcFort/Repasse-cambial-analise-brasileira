@@ -21,7 +21,7 @@ HORIZONTE_IR<-24
 N_BOOT<-500
 
 ORDEM_ECON <- c("log_cambio", "log_ipca_indice", "selic")
-ORDEM_CONT <- c("selic", "log_ipca_indice", "log_cambio")
+ORDEM_CONT <- rev(ORDEM_ECON)
 
 ```
 
@@ -140,7 +140,7 @@ painel_evento(df$data, df$log_ipca_indice, "log(IPCA-índice) — nível",    "l
 painel_evento(df$data, df$selic,           "Selic meta (% a.a.) — nível", "Selic")
 ```
 
-[COMENTARIO SOBRE QUEBRAS]
+As séries em nível sugerem que a amostra atravessa episódios de instabilidade macroeconômica relevantes para a especificação do modelo. O câmbio apresenta mudanças marcantes em torno da crise financeira global de 2008-2009, da recessão brasileira de 2015-2016 e da pandemia de 2020. O IPCA, por ser um índice acumulado de preços, exibe tendência ascendente persistente, enquanto a Selic combina ciclos longos de política monetária com mudanças discretas de patamar. Esses padrões indicam que a análise deve tratar com cuidado a hipótese de estacionariedade em nível e motivam o uso de testes de raiz unitária que permitam quebra estrutural.
 
 ```{r item2b-graficos-estacionaridade, include=TRUE, echo=FALSE, fig.width=10, fig.height=4}
 par(mfrow = c(1, 2), mar = c(4, 4, 3, 1))
@@ -288,7 +288,10 @@ knitr::kable(tabela_kpss, caption = "Teste KPSS — H0 de estacionariedade",
              row.names = FALSE, align = c("l","r","r","c"))
 ```
 
-O teste Zivot-Andrews foi estimado com modelo ***both*** `[ver o pq]`, permitindo quebra em intercepto e tendência. Como robustez, foram testadas diferentes defasagens na regressão auxiliar. Os resultados principais não se alteram.
+O teste Zivot-Andrews foi estimado com modelo de especificação de tendências e constante, permitindo quebra endógena tanto no intercepto quanto na tendência. Essa escolha é adequada porque as três séries podem combinar mudanças de nível com alterações graduais de trajetória ao longo do período analisado. No caso do câmbio, choques externos podem deslocar o nível da série; no caso do IPCA, a própria natureza acumulada do índice torna relevante permitir mudança na tendência; e, no caso da Selic, ciclos de política monetária podem produzir alterações persistentes de patamar.
+
+Como robustez, reportamos o teste com `lag = 0` e `lag = 1`. A comparação é útil porque a inclusão de defasagem na regressão auxiliar controla autocorrelação residual, enquanto a versão sem defasagem preserva uma especificação mais parcimoniosa. Em ambos os casos, a conclusão substantiva é a mesma: as estatísticas em nível não ultrapassam, em valor absoluto, o valor crítico de 5% do modelo `both`, enquanto as primeiras diferenças rejeitam a hipótese nula. Assim, mesmo permitindo quebra estrutural endógena, mantemos a classificação das três séries como integradas de ordem um, I(1).
+
 
 ```{r item2-za, include=TRUE, echo=FALSE, message=FALSE, warning=FALSE}
 # ── Zivot-Andrews (quebra estrutural endógena) ───────────────
@@ -449,7 +452,7 @@ tabela_eg <- rbind(
 )
 
 # Output Equações (para transparência, não necessariamente relevante)
-cat("As regressões de cointegração estimadas foram:\n\n")
+cat("Foram estimadas as seguintes regressões para o teste de cointegração de Engle-Granger:\n\n")
 cat("\\[\n")
 cat("\\begin{aligned}\n")
 cat(gsub("^\\$|\\$$", "", eq_ipca), "\\\\\n")
@@ -464,7 +467,9 @@ knitr::kable(tabela_eg,
              row.names = FALSE, align = c("l","l","r","r","r","r","c"))
 ```
 
-O Engle-Granger foi corrigido para usar os valores críticos de MacKinnon apropriados ao teste de cointegração com $k = 3$ variáveis. Com esses valores críticos, nenhuma das três orientações rejeita H0 de ausência de cointegração a 5%: as estatísticas dos resíduos são menos negativas do que o CV de 5% ($-3{,}74$). Isso corrige a versão anterior, que lia por engano os valores críticos do ADF univariado padrão retornados pelo `ur.df` aplicado aos resíduos.
+Um detalhe necessário foi corrigir os valores críticos do Engle-Granger para utilizar os de MacKinnon apropriados ao teste de cointegração com $k = 3$ variáveis, o que corrige a leitura por engano dos valores críticos do ADF univariado padrão retornados quando aplicados aos resíduos estimados. Com esses valores críticos, nenhuma das três orientações rejeita H0 de raiz unitária e, portanto, de ausência de cointegração a 5%: as estatísticas dos resíduos são menos negativas do que o o valor crítico de 5% ($-3{,}74$).
+
+A não-rejeição, contudo, não constitui prova de ausência de cointegração. O teste de Engle-Granger tem limitações conhecidas que pesam justamente em um sistema multivariado como o nosso: (i) exige a escolha arbitrária de uma variável dependente, e o resultado pode variar conforme essa escolha — até por isso reportamos as três orientações; (ii) por se basear em um teste de raiz unitária (ADF) aplicado a resíduos estimados, tem baixo poder estatístico, tendendo a não rejeitar H0 mesmo quando há cointegração; e (iii) por construção, admite apenas um único vetor de cointegração, sendo incapaz de detectar mais de uma relação de longo prazo. Como o sistema é multivariado e, como se verá a seguir, o Johansen indica a presença de relações de longo prazo, adotamos o Johansen como teste de referência. O resultado negativo do Engle-Granger é, portanto, melhor lido como reflexo de seu baixo poder do que como evidência conclusiva de ausência de cointegração.
 
 ```{r item3-johansen, include=TRUE, echo=FALSE, message=FALSE, warning=FALSE}
 # ── Johansen ──────────────────────────────────────────────────
@@ -479,12 +484,13 @@ jo_trace <- ca.jo(Y, type = "trace", K = K_opt,
 #cat("\n--- Johansen por traço ---\n")
 #summary(jo_trace)
 
-# Teste por máximo autovalor — complemento canônico da Aula 12
+# Teste por máximo autovalor
 jo_eigen <- ca.jo(Y, type = "eigen", K = K_opt,
                   ecdet = "const", spec = "longrun")
 #cat("\n--- Johansen por máximo autovalor ---\n")
 #summary(jo_eigen)
 
+# Quantas relações estáveis de longo prazo o modelo detecta, aquelas que mantêm as variáveis caminhando juntas
 rank_trace_5 <- sum(jo_trace@teststat > jo_trace@cval[, "5pct"])
 rank_eigen_5 <- sum(jo_eigen@teststat > jo_eigen@cval[, "5pct"])
 ```
@@ -520,8 +526,8 @@ tabela_rank <- data.frame(
   `Teste` = c("Traço", "Máximo autovalor"),
   `Rank indicado a 5%` = c(rank_trace_5, rank_eigen_5),
   `Interpretação` = c(
-    paste0(rank_trace_5, " relação(ões) de cointegração"),
-    paste0(rank_eigen_5, " relação(ões) de cointegração")
+    paste0(rank_trace_5, " relações de cointegração"),
+    paste0(rank_eigen_5, " relações de cointegração")
   ),
   check.names = FALSE
 )
@@ -626,9 +632,9 @@ knitr::kable(tab_rank,
   row.names = FALSE, align = c("l","c","r","r","c","l"))
 ```
 
-A escolha do rank tem consequência direta para a leitura de pass-through. Sob rank 1, o sistema tem um único vetor de cointegração normalizado em log(IPCA), do qual se lê um pass-through de longo prazo de aproximadamente `r round(pt_r1,2)` — uma relação de equilíbrio única e interpretável. Sob rank 2, o espaço de cointegração é bidimensional: o pass-through deixa de ser um número unicamente identificado e a segunda relação não admite leitura estrutural. Embora o teste do traço aponte rank 2, e dado que o segundo passo do traço é o marginal (22,67 vs 19,96) e que a não-normalidade dos resíduos tende a inflar o rank, adotamos rank 1 como especificação econômica preferida para a estimativa de pass-through: perde-se apenas o ajuste mecânico do segundo vetor e ganha-se identificação e parcimônia.
+A escolha do rank tem consequência direta para a leitura de pass-through. Sob rank 1, o sistema tem um único vetor de cointegração normalizado em log(IPCA), do qual se lê um pass-through de longo prazo de aproximadamente `r round(pt_r1,4)` — uma relação de equilíbrio única e interpretável. Sob rank 2, o espaço de cointegração é bidimensional: o pass-through deixa de ser um número unicamente identificado e a segunda relação não admite leitura estrutural.
 
-O Johansen passa a ser, portanto, o teste de referência para o sistema: conforme apresentado na Aula 12, sua vantagem sobre Engle-Granger é não exigir a escolha arbitrária de uma variável dependente e permitir múltiplos vetores de cointegração. O Johansen por traço indica rank `r rank_trace_5` a 5%; o teste por máximo autovalor, reportado como complemento canônico, indica rank `r rank_eigen_5` a 5%. Adotamos o rank do teste por traço, que sustenta a existência de relações de longo prazo no sistema e justifica a estimação do VECM.
+Pelas razões expostas, o Johansen passa a ser o teste de referência para o sistema: ele dispensa a escolha de uma variável dependente, tem maior poder estatístico e admite múltiplos vetores de cointegração. O Johansen por traço indica rank `r rank_trace_5` a 5% e o teste por máximo autovalor indica rank `r rank_eigen_5` a 5%. Portanto, adotamos o rank `r rank_trace_5` do teste por traço e autovalor, que sustenta a existência de relações de longo prazo no sistema e justifica a estimação do VECM.
 
 # 5. VECM
 
@@ -670,7 +676,7 @@ beta_df <- cbind(Termo = rownames(vecm_fit$beta),
                  as.data.frame(round(vecm_fit$beta, 4)))
 rownames(beta_df) <- NULL
 knitr::kable(beta_df, row.names = FALSE,
-  caption = "Vetores de cointegração (β) — relações de longo prazo")
+  caption = "Vetores de cointegração (beta) — relações de longo prazo")
 
 # α: velocidade de ajustamento, por equação, com significância
 eq_sum <- summary(vecm_fit$rlm)
@@ -685,16 +691,20 @@ rownames(alpha_tab) <- gsub("Response |\\.d$", "", rownames(alpha_tab))
 alpha_df <- cbind(`Equação (Δ)` = rownames(alpha_tab), as.data.frame(alpha_tab))
 rownames(alpha_df) <- NULL
 knitr::kable(alpha_df, row.names = FALSE,
-  caption = "Ajustamento (α) por equação — *** p<0,001, ** p<0,01, * p<0,05, . p<0,1")
+  caption = "Ajustamento (alpha) por equação — *** p<0,001, ** p<0,01, * p<0,05, . p<0,1")
 ```
 
 O VECM permite separar a dinâmica de curto prazo (coeficientes em diferença) do ajuste para o equilíbrio de longo prazo (coeficiente de ajuste $\alpha$ multiplicado pelo vetor de cointegração $\beta$). Os coeficientes $\alpha$ medem a velocidade de ajustamento de cada variável ao desequilíbrio de longo prazo.
 
-**Vetores de cointegração ($\beta$):** O primeiro vetor (ect1) é normalizado em log(IPCA) e implica a relação de longo prazo $\text{log(IPCA)} - 0{,}504 \cdot \text{log(câmbio)} - 0{,}032 \cdot \text{Selic} \approx 9{,}49$. Economicamente, o coeficiente de 0,50 sobre o câmbio indica que, no longo prazo, uma depreciação de 1% está associada a um aumento de aproximadamente 0,5% no nível de preços — uma estimativa de pass-through de longo prazo moderado, consistente com a literatura para o Brasil (Belaisch, 2003). O segundo vetor (ect2), normalizado em log(câmbio), apresenta coeficiente positivo da Selic. Uma leitura literal de paridade descoberta de juros sugeriria sinal negativo; portanto, não tratamos esse vetor como uma UIP estrutural. Uma interpretação mais cautelosa é que ele captura uma relação de equilíbrio entre câmbio, juros e prêmio de risco doméstico no período brasileiro analisado. Como a identificação estrutural desse canal está fora do escopo do exercício, usamos o ect2 principalmente pelo seu papel mecânico no VECM: ajudar a manter o sistema cointegrado e disciplinar o ajuste de longo prazo.
+**Vetores de cointegração ($\beta$):** a Tabela 10 reporta a normalização de Phillips usada pel o bloco identidade nas duas primeiras variáveis. Nela, o câmbio carrega no segundo vetor, de modo que o pass-through não se lê diretamente das entradas do ect1. Re-normalizando o mesmo espaço de cointegração em log(IPCA) — a relação EC1 da Seção 4 —, a relação de preços de longo prazo é $\text{log(IPCA)} - 0{,}50 \cdot \text{log(câmbio)} - 0{,}03 \cdot \text{Selic} \approx 9{,}52$. Economicamente, o coeficiente de ~0,50 sobre o câmbio indica que, no longo prazo, uma depreciação de 1% está associada a um aumento de cerca de 0,5% no nível de preços — leitura por normalização do espaço de rank 2 (corroborada pela IRF acumulada da Seção 6.1), consistente com a literatura para o Brasil (Belaisch, 2003).
+
+O segundo vetor (ect2), normalizado em log(câmbio), apresenta coeficiente positivo da Selic. Uma leitura literal de paridade descoberta de juros sugeriria sinal negativo; portanto, não tratamos esse vetor como uma UIP estrutural. Uma interpretação mais cautelosa é que ele captura uma relação de equilíbrio entre câmbio, juros e prêmio de risco doméstico no período brasileiro analisado. Como a identificação estrutural desse canal está fora do escopo do exercício, usamos o ect2 principalmente pelo seu papel mecânico no VECM: ajudar a manter o sistema cointegrado e disciplinar o ajuste de longo prazo.
 
 **Coeficientes de ajustamento ($\alpha$):** Para o log(IPCA), $\alpha_1 = -0{,}0014$ (significativo, $p < 0{,}001$) e $\alpha_2 = +0{,}0007$ (significativo): o IPCA se ajusta de forma lenta mas estatisticamente robusta ao desequilíbrio de longo prazo, como esperado para um índice de preços. Para o câmbio, os coeficientes $\alpha$ são pequenos e não-significativos, sugerindo que o câmbio é fracamente exógeno em relação a esse equilíbrio — também consistente com a hipótese de que o câmbio é determinado por fatores externos ao sistema doméstico. A Selic apresenta $\alpha_1 = +0{,}025$ (não-significativo), indicando que a taxa de juros responde menos ao desequilíbrio de longo prazo e mais à dinâmica de curto prazo capturada pelos termos defasados, o que é razoável dado que as decisões do Copom são discricionárias e de frequência mais baixa do que os movimentos cambiais e de preços.
 
 ## 6.1 IRF do VECM via `vec2var`
+
+A decomposição de Cholesky requer uma ordenação das variáveis, da mais exógena à mais endógena contemporaneamente. Adotamos câmbio → IPCA → Selic. O câmbio vem primeiro porque, numa economia pequena e aberta, a taxa nominal é determinada majoritariamente por fatores externos dentro do mês (apetite global por risco, preços de commodities, juros externos) — leitura coerente com a exogeneidade fraca do câmbio encontrada nos coeficientes de ajustamento ($\alpha$) da Seção 5. Ordená-lo primeiro é o que permite que um choque cambial se transmita aos preços já no mês corrente, que é precisamente o canal de pass-through sob estudo. O IPCA vem em seguida, respondendo contemporaneamente ao câmbio (bens comercializáveis e importados). A Selic vem por último por ser a variável mais reativa do sistema: o Copom observa câmbio e inflação dentro do período e ajusta a taxa em resposta a ambos — convenção usual em VARs de política monetária, em que o instrumento de política é ordenado por último.
 
 ```{r item6-irf-vecm, include=TRUE, echo=FALSE, fig.width=10, fig.height=6, message=FALSE, warning=FALSE}
 # ── IRF acumulada do VECM (Aula 12: ca.jo → vec2var → irf) ───
@@ -767,6 +777,79 @@ plota(pega(irf_nc, "selic"),           "Selic — não-cumulativa",           "�
 plota(pega(irf_cu, "selic"),           "Selic — acumulada",                "Selic")
 ```
 
+Como a leitura do pass-through depende dessa ordenação, reestimamos a IRF acumulada sob a ordem inversa, Selic → IPCA → câmbio, em que o câmbio é a variável mais endógena e, por construção, não pode mover o IPCA contemporaneamente — todo o repasse passa a ser defasado.
+
+```{r item6-irf-robustez-ordem, include=TRUE, echo=FALSE, fig.width=10, fig.height=4.5, message=FALSE, warning=FALSE, results='asis'}
+# ── Robustez da ordenação de Cholesky ──────────────────────────
+# Baseline : câmbio → IPCA → Selic  (pass-through contemporâneo ativo)
+# Invertida: Selic → IPCA → câmbio  (câmbio por último: PT só defasado)
+ORDEM_REV <- rev(ORDEM_ECON)                       # selic, log_ipca_indice, log_cambio
+
+jo_trace_rev <- ca.jo(Y[, ORDEM_REV], type = "trace", K = K_opt,
+                      ecdet = "const", spec = "longrun")
+vecm_var_rev <- vec2var(jo_trace_rev, r = rank_coint)
+
+
+irf_nc_rev <- irf(vecm_var_rev, impulse = "log_cambio", response = "log_ipca_indice",
+                  n.ahead = HORIZONTE_IR, ortho = TRUE, boot = TRUE,
+                  runs = N_BOOT, ci = 0.95, cumulative = FALSE)
+irf_cu_rev <- irf(vecm_var_rev, impulse = "log_cambio", response = "log_ipca_indice",
+                  n.ahead = HORIZONTE_IR, ortho = TRUE, boot = TRUE,
+                  runs = N_BOOT, ci = 0.95, cumulative = TRUE)
+
+# baseline reaproveitado do chunk anterior (irf_cu)
+base_d <- data.frame(h  = 0:HORIZONTE_IR,
+                     y  = irf_cu$irf$log_cambio[,   "log_ipca_indice"],
+                     lo = irf_cu$Lower$log_cambio[, "log_ipca_indice"],
+                     hi = irf_cu$Upper$log_cambio[, "log_ipca_indice"])
+rev_y <- irf_cu_rev$irf$log_cambio[, "log_ipca_indice"]
+
+# baseline reaproveitado do chunk anterior (irf_nc)
+base_d_nc <- data.frame(h  = 0:HORIZONTE_IR,
+                     y  = irf_nc$irf$log_cambio[,   "log_ipca_indice"],
+                     lo = irf_nc$Lower$log_cambio[, "log_ipca_indice"],
+                     hi = irf_nc$Upper$log_cambio[, "log_ipca_indice"])
+rev_y_nc <- irf_nc_rev$irf$log_cambio[, "log_ipca_indice"]
+
+# Plot grafico acumulado
+plot(base_d$h, base_d$y, type = "n", ylim = range(base_d$lo, base_d$hi, rev_y),
+     main = "Pass-through acumulado do IPCA a choque cambial - ordem econômica invertida",
+     xlab = "horizonte (meses)", ylab = "log(IPCA) acumulado")
+polygon(c(base_d$h, rev(base_d$h)), c(base_d$lo, rev(base_d$hi)),
+        col = adjustcolor("#c0392b", 0.12), border = NA)
+abline(h = 0, lty = 2, col = "grey50")
+lines(base_d$h, base_d$y, col = "#1f4e79", lwd = 2)              # baseline
+lines(base_d$h, rev_y,    col = "#c0392b", lwd = 2, lty = 2)     # invertida
+legend("topleft", bty = "n", cex = 0.8,
+       legend = c("câmbio → IPCA → Selic (baseline)",
+                  "Selic → IPCA → câmbio (invertida)",
+                  "IC 95% bootstrap (baseline)"),
+       col = c("#1f4e79", "#c0392b", adjustcolor("#c0392b", 0.4)),
+       lty = c(1, 2, NA), pch = c(NA, NA, 15), lwd = c(2, 2, NA))
+
+# Plot grafico nao acumulado
+plot(base_d_nc$h, base_d_nc$y, type = "n", ylim = range(base_d_nc$lo, base_d_nc$hi, rev_y_nc),
+     main = "Pass-through não acumulado do IPCA a choque cambial - ordem econômica invertida",
+     xlab = "horizonte (meses)", ylab = "log(IPCA) acumulado")
+polygon(c(base_d_nc$h, rev(base_d_nc$h)), c(base_d_nc$lo, rev(base_d_nc$hi)),
+        col = adjustcolor("#c0392b", 0.12), border = NA)
+abline(h = 0, lty = 2, col = "grey50")
+lines(base_d_nc$h, base_d_nc$y, col = "#1f4e79", lwd = 2)              # baseline
+lines(base_d_nc$h, rev_y_nc,    col = "#c0392b", lwd = 2, lty = 2)     # invertida
+legend("topleft", bty = "n", cex = 0.8,
+       legend = c("câmbio → IPCA → Selic (baseline)",
+                  "Selic → IPCA → câmbio (invertida)",
+                  "IC 95% bootstrap (baseline)"),
+       col = c("#1f4e79", "#c0392b", adjustcolor("#c0392b", 0.4)),
+       lty = c(1, 2, NA), pch = c(NA, NA, 15), lwd = c(2, 2, NA))
+
+# guarda os valores em h=24 para citar no texto via inline R
+pt_base_h <- tail(base_d$y, 1)
+pt_rev_h  <- tail(rev_y, 1)
+```
+ 
+O pass-through acumulado em 24 meses é de `r round(pt_base_h, 3)` na ordenação baseline e `r round(pt_rev_h, 3)` na invertida. Embora a ordem invertida suprima, por construção, o repasse contemporâneo, as duas trajetórias são praticamente idênticas e próximas de zero nos primeiros meses, divergindo apenas no médio prazo, quando a versão invertida acumula um repasse um pouco maior. Em todo o horizonte, ambas permanecem positivas, da mesma ordem de grandeza, e a trajetória invertida fica contida na banda de confiança bootstrap de 95% da baseline. A leitura central — um choque cambial que se acumula sobre o nível de preços ao longo do horizonte — não se inverte com a reordenação. Não interpretamos isso como prova de robustez: o esquema recursivo permanece uma hipótese de identificação mantida. O exercício mostra, mais modestamente, que a conclusão de médio prazo é pouco sensível à ordem escolhida, ao contrário do que ocorreria se a identificação fosse frágil.
+
 ```{r item6-irf-vecm-output-fevd, include=TRUE, echo=FALSE, fig.width=10, fig.height=6, message=FALSE, warning=FALSE, results='asis'}
 
 # >>> NOVO: termo de correção de erro no tempo, com bandas de evento
@@ -787,88 +870,45 @@ plota_ect(datas_ect, ect_r2[, 2], "ECT2 do rank 2 — 2ª dimensão (fragilidade
 
 A IRF acumulada do VECM fecha a ponte entre a análise de curto prazo do VAR em diferenças e a relação de longo prazo estimada nos vetores de cointegração. O procedimento `ca.jo` → `vec2var` → `irf` segue o pipeline apresentado para VECM: após estimar o sistema cointegrado, convertemos sua representação para calcular funções impulso-resposta. Diferentemente da IRF do VAR em diferenças, a IRF acumulada preserva o canal de nível: um choque cambial pode não gerar um pico mensal expressivo do IPCA, mas pode se acumular ao longo do horizonte, o que é exatamente a lógica econômica do pass-through cambial de longo prazo.
 
-# 7. Diagnósticos de Especificação (Item 7)
-
-```{r item7-diag, include=TRUE, echo=FALSE, message=FALSE, warning=FALSE, eval=FALSE}
-# ── Diagnósticos do VAR ───────────────────────────────────────
-
-# Portmanteau (autocorrelação serial)
-pt_test <- serial.test(vecm_var_econ, lags.pt = 12, type = "PT.adjusted")
-cat("Portmanteau (Ljung-Box multivariado):\n")
-print(pt_test$serial)
-
-# Normalidade (Jarque-Bera multivariado)
-norm_test <- normality.test(vecm_var_econ)
-cat("\nJarque-Bera multivariado:\n")
-print(norm_test$jb.mul)
-
-# Heterocedasticidade — teste de White multivariado
-# Abordagem: regressão auxiliar de cada resíduo^2 sobre os regressores e seus quadrados
-# Implementação via lmtest::bptest em cada equação do VAR (Breusch-Pagan)
-resid_var <- residuals(vecm_var_econ)
-fitted_var <- fitted(vecm_var_econ)
-bp_results <- lapply(seq_len(ncol(resid_var)), function(i) {
-  lmtest::bptest(lm(resid_var[, i]^2 ~ fitted_var[, i] + I(fitted_var[, i]^2)))
-})
-names(bp_results) <- colnames(resid_var)
-cat("\nTeste de Breusch-Pagan (heterocedasticidade) — por equação:\n")
-for (nm in names(bp_results)) {
-  cat(sprintf("  %s: BP = %.4f, p = %.4f\n",
-              nm, bp_results[[nm]]$statistic, bp_results[[nm]]$p.value))
-}
-
-# Estabilidade
-cat("\nRaízes do polinômio característico:\n")
-print(round(roots(vecm_var_econ), 4))
-cat("Sistema estável:", all(roots(vecm_var_econ) < 1), "\n")
-```
+# 7. Diagnósticos de Especificação
 
 ```{r item7-funcoes-diag, include=FALSE, echo=FALSE}
 extrair_stat <- function(x) {
   # Caso normality.test(): x pode ser uma lista com $JB, $Skewness, $Kurtosis
-  if (!is.null(x$JB) && inherits(x$JB, "htest")) {
-    return(as.numeric(x$JB$statistic))
-  }
-
+  if (!is.null(x$JB) && inherits(x$JB, "htest")) {return(as.numeric(x$JB$statistic))}
   # Caso padrão: objetos htest
-  if (inherits(x, "htest")) {
-    return(as.numeric(x$statistic))
-  }
-
+  if (inherits(x, "htest")) {return(as.numeric(x$statistic))}
   # Casos gerais
   if (!is.null(x$statistic)) return(as.numeric(x$statistic))
   if (!is.null(x$teststat))  return(as.numeric(x$teststat))
-
   NA_real_
 }
 
 extrair_pval <- function(x) {
   # Caso normality.test(): x pode ser uma lista com $JB, $Skewness, $Kurtosis
-  if (!is.null(x$JB) && inherits(x$JB, "htest")) {
-    return(as.numeric(x$JB$p.value))
-  }
-
+  if (!is.null(x$JB) && inherits(x$JB, "htest")) {return(as.numeric(x$JB$p.value))}
   # Caso padrão: objetos htest
-  if (!is.null(x$p.value)) {
-    return(as.numeric(x$p.value))
-  }
-
+  if (!is.null(x$p.value)) {return(as.numeric(x$p.value))}
   NA_real_
 }
 ```
 
-Aplicamos quatro diagnósticos: Portmanteau (autocorrelação serial), Jarque-Bera (normalidade), Breusch-Pagan por equação (heterocedasticidade) e verificação de estabilidade pelas raízes do polinômio característico. O sistema é estável se todas as raízes têm módulo < 1.
+Aplicamos quatro diagnósticos: Portmanteau (autocorrelação serial), Jarque-Bera (normalidade), Breusch-Pagan por equação (heterocedasticidade) e verificação de estabilidade pelas raízes do polinômio característico. No caso de um VECM cointegrado, a leitura das raízes deve ser feita de forma que raízes iguais ou próximas de 1 podem refletir a presença de tendências estocásticas comuns, e não necessariamente instabilidade explosiva do sistema.
 
-**Análise do VECM:** O Portmanteau não rejeita H0 a 5% ($p = 0{,}103$), indicando ausência de autocorrelação serial residual — o modelo está bem especificado em termos dinâmicos para a ordem de defasagem selecionada (VAR(4)). O Jarque-Bera rejeita normalidade multivariada ($p \approx 0$), com a componente de curtose sendo dominante ($\chi^2 = 194{,}7$): os resíduos têm caudas pesadas, o que é esperado em séries macroeconômicas com episódios extremos (crise de 2008, pandemia de 2020). A violação de normalidade não invalida a consistência dos estimadores de MQO, mas as inferências baseadas em distribuições assintóticas devem ser interpretadas com cautela; o uso de intervalos de confiança via *bootstrap* para as IRFs (como adotado) mitiga esse problema. O teste de Breusch-Pagan por equação avalia heterocedasticidade dos resíduos sem impor estrutura de dependência temporal específica: a rejeição em uma ou mais equações indica que a variância dos resíduos não é constante, o que é comum em séries com câmbio e inflação sujeitas a choques assimétricos. Isso não invalida as estimativas pontuais dos coeficientes VAR, mas recomenda cautela nos testes de significância individuais. A estabilidade do sistema está garantida: todas as raízes do polinômio característico têm módulo < 1 (máximo: 0,82).
-
-```{r item7-diag-vecm, include=TRUE, echo=FALSE, message=FALSE, warning=FALSE}
+```{r item7-diag-vecm, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
 vecm_as_var <- vec2var(jo_trace, r = rank_coint)
 
 pt_vecm   <- serial.test(vecm_as_var, lags.pt = 12, type = "PT.adjusted")
 norm_vecm <- normality.test(vecm_as_var)
 
 cat("Portmanteau (VECM):\n");  print(pt_vecm$serial)
+```
+
+```{r item7-diag-vecm-2, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
 cat("\nJarque-Bera (VECM):\n"); print(norm_vecm$jb.mul)
+```
+
+```{r item7-diag-vecm-3, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
 
 # Heterocedasticidade — Breusch-Pagan por equação
 resid_vecm  <- residuals(vecm_as_var)
@@ -911,7 +951,7 @@ for (j in seq_len(ncol(resid_vecm))) {
 }
 ```
 
-```{r item7-diag-vecm-k6, include=TRUE, echo=FALSE, message=FALSE, warning=FALSE}
+```{r item7-diag-vecm-k6, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
 # ── Robustez: VECM com K = 6 ─────────────────────────────────
 # Uma defasagem adicional é testada para verificar se a autocorrelação
 # residual do VECM-base decorre de ordem dinâmica ligeiramente insuficiente.
@@ -926,9 +966,15 @@ print(pt_vecm6$serial)
 ```
 
 ```{r item7-diag-vecm-tabela, include=TRUE, echo=FALSE, eval=TRUE}
+#cat(names(bp_vecm))
+
+max_raiz_vecm <- max(raizes_vecm)
+k_vars <- ncol(Y)
+trends_comuns <- k_vars - rank_coint
+
 diag_vecm_df <- data.frame(
-  Teste = c("Portmanteau (lags=12)",
-            "Portmanteau robustez (K=6)",
+  Teste = c("Portmanteau ajustado — VECM-base",
+            "Portmanteau ajustado — VECM com K = 6",
             "Jarque-Bera multivariado",
             "Breusch-Pagan — log(câmbio)",
             "Breusch-Pagan — log(IPCA)",
@@ -938,18 +984,24 @@ diag_vecm_df <- data.frame(
     round(extrair_stat(pt_vecm$serial),    4),
     round(extrair_stat(pt_vecm6$serial),   4),
     round(extrair_stat(norm_vecm$jb.mul),  4),
-    round(bp_vecm[[1]]$statistic,          4),
-    round(bp_vecm[[2]]$statistic,          4),
-    round(bp_vecm[[3]]$statistic,          4),
+    round(as.numeric(bp_vecm[["resids of log_cambio"]]$statistic),          4),
+    round(as.numeric(bp_vecm[["resids of log_ipca_indice"]]$statistic),          4),
+    round(as.numeric(bp_vecm[["resids of selic"]]$statistic),          4),
+    #round(bp_vecm[[1]]$statistic,          4),
+    #round(bp_vecm[[2]]$statistic,          4),
+    #round(bp_vecm[[3]]$statistic,          4),
     round(max(raizes_vecm),                4)
   ),
   `p-valor` = c(
     round(extrair_pval(pt_vecm$serial),    4),
     round(extrair_pval(pt_vecm6$serial),   4),
     round(extrair_pval(norm_vecm$jb.mul),  4),
-    round(bp_vecm[[1]]$p.value,            4),
-    round(bp_vecm[[2]]$p.value,            4),
-    round(bp_vecm[[3]]$p.value,            4),
+      round(as.numeric(bp_vecm[["resids of log_cambio"]]$p.value),          4),
+    round(as.numeric(bp_vecm[["resids of log_ipca_indice"]]$p.value),          4),
+    round(as.numeric(bp_vecm[["resids of selic"]]$p.value),          4),
+    #round(bp_vecm[[1]]$p.value,            4),
+    #round(bp_vecm[[2]]$p.value,            4),
+    #round(bp_vecm[[3]]$p.value,            4),
     NA
   ),
   H0 = c("Resíduos são ruído branco",
@@ -958,7 +1010,7 @@ diag_vecm_df <- data.frame(
          "Homocedasticidade",
          "Homocedasticidade",
          "Homocedasticidade",
-         "Estável se max|raiz| < 1"),
+         "Estável: k-r raízes =1 e demais <1"),
   check.names = FALSE
 )
 
@@ -968,11 +1020,11 @@ knitr::kable(diag_vecm_df, caption = "Diagnósticos do VECM",
 
 Os mesmos diagnósticos aplicados ao VECM permitem avaliar se o modelo com correção de erro está bem especificado.
 
-**Análise do VECM:** O Portmanteau do VECM-base rejeita H0 a 5% (p-valor reportado na tabela), indicando autocorrelação serial residual com a ordem selecionada pelo AIC. Para verificar se o problema decorre de defasagem ligeiramente insuficiente, reestimamos o Johansen e o VECM com $K = 6$ e reaplicamos o Portmanteau. o Portmanteau permanece significativo a 5%, com p-valor inferior a 0,01. Portanto, a autocorrelação residual não parece ser apenas um problema de defasagem insuficiente. A interpretação correta é que choques estruturais do período — como 2008, 2015-2016 e 2020 — provavelmente exigiriam dummies ou variáveis adicionais fora do escopo deste exercício. O Jarque-Bera rejeita normalidade pelos mesmos motivos do VAR (curtose elevada por episódios extremos). Os testes de Breusch-Pagan por equação avaliam heterocedasticidade sem estrutura temporal imposta: a significância em determinadas equações indica variância não-constante dos resíduos, o que é comum dado o câmbio e os ciclos da Selic no período. Quanto à estabilidade, as raízes do polinômio característico do VECM incluem valores iguais ou próximos de 1; isso **não é um problema** em si, pois é o comportamento esperado de um VECM com rank $r = 2 < k = 3$, que possui $k - r = 1$ trend estocástico comum. O sistema é estável no sentido de que as variáveis são cointegradas e retornam ao equilíbrio de longo prazo após choques.
+O Portmanteau do VECM-base rejeita H0 a 5% (p-valor reportado na tabela), indicando autocorrelação serial residual com a ordem selecionada pelo AIC. Para verificar se o problema decorre de defasagem ligeiramente insuficiente, reestimamos o Johansen e o VECM com $K = 6$ e reaplicamos o Portmanteau, mantendo `lags.pt = 12` em ambas as especificações para que as estatísticas sejam comparáveis. O Portmanteau permanece significativo a 5%, com p-valor inferior a 0,01. Portanto, a autocorrelação residual não parece ser apenas um problema de defasagem insuficiente. A interpretação correta é que choques estruturais do período — como 2008, 2015-2016 e 2020 — provavelmente exigiriam dummies ou variáveis adicionais (esta última fora do escopo deste exercício). O Jarque-Bera rejeita normalidade pelos mesmos motivos do VAR (curtose elevada por episódios extremos). Os testes de Breusch-Pagan por equação — na forma de uma regressão dos resíduos ao quadrado sobre os valores ajustados e seu quadrado, portanto uma variante do tipo White — avaliam heterocedasticidade sem impor estrutura temporal; um teste ARCH-LM seria o complemento natural caso se quisesse capturar heterocedasticidade condicional. A significância em determinadas equações indica variância não-constante dos resíduos, o que é comum dado o câmbio e os ciclos da Selic no período. Quanto à estabilidade, o critério usual $\max|\text{raiz}| < 1$ deve ser lido com cuidado neste contexto: as raízes do polinômio característico do VECM incluem exatamente um valor igual (ou muito próximo) a 1, o que **não é um problema** em si, mas o comportamento esperado de um VECM com rank $r = 2 < k = 3$, que possui $k - r = 1$ tendência estocástica comum. As demais raízes permanecem dentro do círculo unitário. O sistema é estável no sentido relevante: as variáveis são cointegradas e retornam ao equilíbrio de longo prazo após choques.
 
 # 8. Repasse cambial por regimes
 
-A estimativa de pass-through obtida na amostra completa (≈ 0,50) pressupõe uma relação
+A estimativa de pass-through obtida na amostra completa ($≈ 0,50$) pressupõe uma relação
 de longo prazo invariante no tempo entre câmbio, preços e juros. Essa hipótese é forte
 para um período que atravessa o boom de commodities, a recessão de 2015-2016, a pandemia
 e o ciclo inflacionário subsequente; e a autocorrelação residual documentada na Seção 7,
@@ -1019,6 +1071,16 @@ knitr::kable(tab_sub, row.names = FALSE,
   align = c("l","l","r","r","c","r","r"))
 ```
 
+O contraste entre as subamostras fecha, em parte, o diagnóstico. A janela pós-2015 é a única bem especificada quanto à autocorrelação, o que
+reforça que parcela relevante da má especificação da amostra cheia decorre de instabilidade
+de parâmetros, e não de defasagem insuficiente — consistente com a persistência do problema
+sob K = 6. Por outro lado, as janelas pré-2015 e pré-COVID permanecem com Portmanteau
+significativo, indicando que a instabilidade não é a única fonte do problema: mesmo dentro de
+um regime, a especificação ainda demandaria as extensões já apontadas — dummies para os
+choques estruturais de 2008, 2015-2016 e 2020 e/ou variáveis adicionais (preços de
+importação, hiato do produto, expectativas de inflação). Por fim, o fato de a janela mais limpa selecionar endogenamente rank 1 dá suporte adicional à leitura do pass-through pela relação de preços (primeiro vetor), conforme discutido na Seção 4.
+
+
 ```{r item8-repasse-por-regimes-grafs, include=TRUE, echo=FALSE, results='asis'}
 sub_reg <- tab_sub[tab_sub$Regime != "Amostra cheia", ]
 pt_vals <- sub_reg$`Pass-through`
@@ -1030,7 +1092,8 @@ text(bp, pt_vals, labels = round(pt_vals, 2), pos = 3, cex = 0.85)
 legend("topright", lty = 2, col = "#c0392b", legend = "amostra cheia", bty = "n")
 ```
 
-Heterogeneidade entre regimes. Os resultados revelam que o coeficiente de 0,50 da amostra
+
+Os resultados revelam que o coeficiente de 0,50 da amostra
 cheia é a média de regimes muito distintos. Na janela pré-2015 (2003-2014), o pass-through
 estimado é praticamente nulo (−0,02). O período é dominado pela forte apreciação do real
 durante o boom de commodities, enquanto o IPCA seguiu em trajetória ascendente: uma relação
@@ -1048,24 +1111,142 @@ disparada inflacionária e o ciclo agressivo de aperto da Selic, de modo que a e
 instável e deve ser lida como ilustração dos limites do exercício, não como um pass-through
 estrutural.
 
-Conexão com os diagnósticos. O contraste entre as subamostras fecha, em parte, o diagnóstico
-da Seção 7. A janela pós-2015 é a única bem especificada quanto à autocorrelação, o que
-reforça que parcela relevante da má especificação da amostra cheia decorre de instabilidade
-de parâmetros, e não de defasagem insuficiente — consistente com a persistência do problema
-sob K = 6. Por outro lado, as janelas pré-2015 e pré-COVID permanecem com Portmanteau
-significativo, indicando que a instabilidade não é a única fonte do problema: mesmo dentro de
-um regime, a especificação ainda demandaria as extensões já apontadas — dummies para os
-choques estruturais de 2008, 2015-2016 e 2020 e/ou variáveis adicionais (preços de
-importação, hiato do produto, expectativas de inflação). Por fim, o fato de a janela mais
-limpa selecionar endogenamente rank 1 dá suporte adicional à opção, feita na Seção 4, de
-adotar o vetor de cointegração único como especificação econômica preferida para a leitura do
-pass-through.
+# 9. VECM com dummies
 
-# 9. Conclusão
+O VECM testado anteriormente recaía em um problema de especificação. Procuramos explorar uma das soluções propostas na Seção 8 deste trabalho: a inclusão de dummies.
 
-O trabalho documentou empiricamente o canal cambial de transmissão de choques para a inflação no Brasil sob o regime de metas de inflação (jan/2003–dez/2025). Os resultados principais são: (i) as três séries — log(IPCA), log(câmbio) e Selic — são classificadas como I(1) com base no procedimento sequencial do ADF e no complemento do KPSS, sem depender circularmente do Johansen para justificar a ordem de integração da Selic; (ii) o teste Zivot-Andrews confirma a não estacionariedade em nível mesmo na presença de quebras estruturais endógenas (nov/2014, jun/2004, mai/2017); (iii) o Engle-Granger, corrigido com valores críticos de MacKinnon para $k = 3$, não rejeita H0 de ausência de cointegração, enquanto o Johansen — teste mais adequado para sistemas multivariados com possibilidade de múltiplos vetores — indica cointegração e sustenta a estimação do VECM; (vi) a análise por subamostras mostra que o pass-through de 0,50 da amostra cheia mascara forte heterogeneidade — nulo no período de apreciação pré-2015, ≈0,54 no pós-2015 (única janela bem especificada, que seleciona rank 1) — evidenciando que a autocorrelação residual decorre em boa parte de instabilidade de parâmetros; extensões futuras com dummies de quebra e variáveis adicionais permanecem necessárias; (v) no VECM, o vetor de cointegração normalizado em log(IPCA) estima um coeficiente de longo prazo de aproximadamente 0,50 para o câmbio, e a IRF acumulada do VECM via `vec2var` permite recuperar o canal de nível que o VAR em diferenças remove; (vi) o VAR está bem especificado em termos de autocorrelação, enquanto o VECM apresenta autocorrelação residual mesmo na robustez com \(K = 6\), sugerindo que a especificação exigiria extensões futuras com dummies para choques estruturais ou variáveis adicionais.
+```{r item9-vecm-dummies-intervencao, include=TRUE, echo=FALSE, message=FALSE, warning=FALSE}
+# ============================================================
+# 9. VECM com dummies determinísticas de intervenção
+# ============================================================
+# As dummies entram via dumvar no ca.jo.
+# Elas não são novas variáveis endógenas: funcionam como controles
+# determinísticos para episódios extraordinários da amostra.
 
-# 9. Referências
+datas_modelo <- df$data
+
+dum_interv <- data.frame(
+  D_2008m10 = as.integer(format(datas_modelo, "%Y-%m") == "2008-10"),
+  D_2015m09 = as.integer(format(datas_modelo, "%Y-%m") == "2015-09"),
+  D_2016m01 = as.integer(format(datas_modelo, "%Y-%m") == "2016-01"),
+  D_2020m03 = as.integer(format(datas_modelo, "%Y-%m") == "2020-03"),
+  D_2020m08 = as.integer(format(datas_modelo, "%Y-%m") == "2020-08")
+)
+
+dum_interv <- as.matrix(dum_interv)
+
+# Checagem: dumvar precisa ter o mesmo número de linhas do sistema endógeno
+stopifnot(nrow(dum_interv) == nrow(Y))
+
+tab_dum_interv <- data.frame(
+  #Dummy = colnames(dum_interv),
+  Dummies = c("2008-10", "2015-09", "2016-01", "2020-03", "2020-08"),
+  Motivação = c(
+    "agravamento da crise financeira global",
+    "estresse cambial no ciclo recessivo doméstico",
+    "quebra endógena do câmbio em diferença no teste ZA",
+    "choque inicial da pandemia nos mercados",
+    "quebra endógena do IPCA em diferença no teste ZA"
+  ),
+  check.names = FALSE
+)
+
+knitr::kable(
+  tab_dum_interv,
+  caption = "Dummies determinísticas de intervenção incluídas no VECM",
+  row.names = FALSE,
+  align = c("c", "l")
+)
+
+# Johansen com dummies determinísticas de intervenção
+jo_trace_dum <- ca.jo(
+  Y,
+  type   = "trace",
+  K      = K_opt,
+  ecdet  = "const",
+  spec   = "longrun",
+  dumvar = dum_interv
+)
+
+# Rank indicado pelo traço a 5%
+rank_trace_dum_5 <- sum(jo_trace_dum@teststat > jo_trace_dum@cval[, "5pct"])
+
+# Para vec2var, usamos o rank indicado, limitado ao intervalo admissível.
+# Se o rank vier 0 ou full rank, isso deve ser interpretado como sinal
+# de instabilidade da especificação, não como resultado principal automático.
+rank_dum_usado <- max(min(rank_trace_dum_5, ncol(Y) - 1), 1)
+
+vecm_dum_as_var <- vec2var(jo_trace_dum, r = rank_dum_usado)
+
+pt_vecm_dum <- serial.test(
+  vecm_dum_as_var,
+  lags.pt = 12,
+  type = "PT.adjusted"
+)
+
+norm_vecm_dum <- normality.test(vecm_dum_as_var)
+
+#cat("Rank Johansen com dummies de intervenção:", rank_trace_dum_5, "\n\n")
+#cat("Portmanteau — VECM com dummies de intervenção:\n")
+#print(pt_vecm_dum$serial)
+```
+
+```{r item9-tabela-comparacao-dummies, include=TRUE, echo=FALSE, message=FALSE, warning=FALSE}
+
+rank_trace_6 <- sum(jo_trace_6@teststat > jo_trace_6@cval[, "5pct"])
+
+tab_dum_comparacao <- data.frame(
+  Especificação = c(
+    "VECM-base",
+    "VECM com K = 6",
+    "VECM com dummies de intervenção"
+  ),
+  Correção = c(
+    "-",
+    "mais defasagens",
+    "choques determinados"
+  ),
+  `Rank utilizado` = c(
+    rank_coint,
+    rank_coint,
+    rank_dum_usado
+  ),
+  `Portmanteau` = c(
+    round(extrair_stat(pt_vecm$serial), 4),
+    round(extrair_stat(pt_vecm6$serial), 4),
+    round(extrair_stat(pt_vecm_dum$serial), 4)
+  ),
+  `p-valor` = c(
+    round(extrair_pval(pt_vecm$serial), 4),
+    round(extrair_pval(pt_vecm6$serial), 4),
+    round(extrair_pval(pt_vecm_dum$serial), 4)
+  ),
+  Diagnóstico = c(
+    ifelse(extrair_pval(pt_vecm$serial) < 0.05,
+           "rejeita ruído branco", "não rejeita ruído branco"),
+    ifelse(extrair_pval(pt_vecm6$serial) < 0.05,
+           "rejeita ruído branco", "não rejeita ruído branco"),
+    ifelse(extrair_pval(pt_vecm_dum$serial) < 0.05,
+           "rejeita ruído branco", "não rejeita ruído branco")
+  ),
+  check.names = FALSE
+)
+
+knitr::kable(
+  tab_dum_comparacao,
+  caption = "Comparação de especificações: Portmanteau antes e depois das dummies de intervenção",
+  row.names = FALSE,
+  align = c("l", "l", "c", "r", "r", "l")
+)
+```
+
+As dummies entram apenas como controles determinísticos, sem alterar o rank adotado: mantemos o rank = 2 da especificação base, até porque, sob inclusão de dummies, os valores críticos do teste do traço deixam de coincidir exatamente com os tabelados padrão — a distribuição assintótica é afetada pela presença dos termos determinísticos adicionais, de modo que o rank indicado nessa especificação é tratado como aproximado. A inclusão das dummies não elimina a rejeição da hipótese de ruído branco pelo Portmanteau. Isso indica que os choques explicam parte da má especificação, mas não toda. A autocorrelação residual remanescente sugere que o sistema ainda exigiria variáveis adicionais (como expectativas de inflação, hiato do produto, preços de importação ou commodities) ou uma modelagem mais explícita de mudança de regime.
+
+# 10. Conclusão
+
+O trabalho documentou empiricamente o canal cambial de transmissão de choques para a inflação no Brasil sob o regime de metas de inflação (jan/2003–dez/2025). Os resultados principais são: (i) as três séries — log(IPCA), log(câmbio) e Selic — são classificadas como I(1) com base no procedimento sequencial do ADF e no complemento do KPSS, sem depender circularmente do Johansen para justificar a ordem de integração da Selic; (ii) o teste Zivot-Andrews confirma a não estacionariedade em nível mesmo na presença de quebras estruturais endógenas (nov/2014, jun/2004, mai/2017); (iii) o Engle-Granger, corrigido com valores críticos de MacKinnon para $k = 3$, não rejeita H0 de ausência de cointegração, enquanto o Johansen — teste mais adequado para sistemas multivariados com possibilidade de múltiplos vetores — indica cointegração e sustenta a estimação do VECM; ; (iv) no VECM, o vetor de cointegração normalizado em log(IPCA) estima um coeficiente de longo prazo de aproximadamente 0,50 para o câmbio, e a IRF acumulada do VECM via `vec2var` permite recuperar o canal de nível que o VAR em diferenças remove; (v) a análise por subamostras mostra que o pass-through de 0,50 da amostra cheia mascara forte heterogeneidade — nulo no período de apreciação pré-2015, $≈0,54$ no pós-2015 (única janela bem especificada, que seleciona rank 1) — evidenciando que a autocorrelação residual decorre em boa parte de instabilidade de parâmetros; extensões futuras variáveis adicionais permanecem necessárias.
+
+# 11. Referências
 
 - BELAISCH, A. Exchange rate pass-through in Brazil. IMF Working Paper, 2003.
 - GONÇALVES, C.; CERQUEIRA, V.; FEIJÓ, F. Pass-through of exchange rate shocks in Brazil as a small open economy. CEPAL, 2016.

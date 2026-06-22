@@ -67,17 +67,28 @@ selic <- selic_raw %>%
   filter(data >= DATA_INICIAL, data <= DATA_FINAL) %>%
   dplyr::select(data, valor)
 
+# ── IBC-Br com ajuste sazonal — BCB/SGS 24364 (mensal) ────────
+ibcbr_raw <- read.csv2(file.path(pasta_input, "ibcbr_sgs_24364.csv"),
+                        quote = "\"", stringsAsFactors = FALSE)
+names(ibcbr_raw) <- c("data", "valor")
+ibcbr_raw$data  <- as.Date(ibcbr_raw$data, format = "%d/%m/%Y")
+ibcbr_raw$valor <- as.numeric(gsub(",", ".", ibcbr_raw$valor))
+ibcbr <- ibcbr_raw %>% filter(data >= DATA_INICIAL, data <= DATA_FINAL)
+
+
 # ── Base alinhada ─────────────────────────────────────────────
 df <- Reduce(function(a, b) merge(a, b, by = "data", all = FALSE),
              list(
                data.frame(data = ipca$data,   ipca_indice = ipca$valor),
                data.frame(data = cambio$data,  cambio      = cambio$valor),
-               data.frame(data = selic$data,   selic       = selic$valor)
+               data.frame(data = selic$data,   selic       = selic$valor),
+               data.frame(data = ibcbr$data,   ibcbr       = ibcbr$valor)
              ))
 
-# Transformações: log(IPCA) e log(câmbio); Selic em nível
+# Transformações: log(IPCA), log(câmbio) e log(ibcbr); Selic em nível
 df$log_ipca_indice <- log(df$ipca_indice)
 df$log_cambio      <- log(df$cambio)
+df$log_ibcbr       <- log(df$ibcbr)
 
 cat("Observações:", nrow(df), "| De:", format(min(df$data)), "a:", format(max(df$data)))
 ```
@@ -1242,11 +1253,143 @@ knitr::kable(
 
 As dummies entram apenas como controles determinísticos, sem alterar o rank adotado: mantemos o rank = 2 da especificação base, até porque, sob inclusão de dummies, os valores críticos do teste do traço deixam de coincidir exatamente com os tabelados padrão — a distribuição assintótica é afetada pela presença dos termos determinísticos adicionais, de modo que o rank indicado nessa especificação é tratado como aproximado. A inclusão das dummies não elimina a rejeição da hipótese de ruído branco pelo Portmanteau. Isso indica que os choques explicam parte da má especificação, mas não toda. A autocorrelação residual remanescente sugere que o sistema ainda exigiria variáveis adicionais (como expectativas de inflação, hiato do produto, preços de importação ou commodities) ou uma modelagem mais explícita de mudança de regime.
 
-# 10. Conclusão
+# 10. VECM com atividade real (IBC-Br)
 
-O trabalho documentou empiricamente o canal cambial de transmissão de choques para a inflação no Brasil sob o regime de metas de inflação (jan/2003–dez/2025). Os resultados principais são: (i) as três séries — log(IPCA), log(câmbio) e Selic — são classificadas como I(1) com base no procedimento sequencial do ADF e no complemento do KPSS, sem depender circularmente do Johansen para justificar a ordem de integração da Selic; (ii) o teste Zivot-Andrews confirma a não estacionariedade em nível mesmo na presença de quebras estruturais endógenas (nov/2014, jun/2004, mai/2017); (iii) o Engle-Granger, corrigido com valores críticos de MacKinnon para $k = 3$, não rejeita H0 de ausência de cointegração, enquanto o Johansen — teste mais adequado para sistemas multivariados com possibilidade de múltiplos vetores — indica cointegração e sustenta a estimação do VECM; ; (iv) no VECM, o vetor de cointegração normalizado em log(IPCA) estima um coeficiente de longo prazo de aproximadamente 0,50 para o câmbio, e a IRF acumulada do VECM via `vec2var` permite recuperar o canal de nível que o VAR em diferenças remove; (v) a análise por subamostras mostra que o pass-through de 0,50 da amostra cheia mascara forte heterogeneidade — nulo no período de apreciação pré-2015, $≈0,54$ no pós-2015 (única janela bem especificada, que seleciona rank 1) — evidenciando que a autocorrelação residual decorre em boa parte de instabilidade de parâmetros; extensões futuras variáveis adicionais permanecem necessárias.
+A Seção 9 mostrou que as dummies de intervenção atenuam, mas não eliminam, a autocorrelação residual. Seguindo a tentativa de incluir uma medida de atividade real, esta seção acrescenta o **IBC-Br**, uma proxy mensal do produto ao sistema. Usamos a série dessazonalizada já que introduzir uma única série fortemente sazonal em sua forma bruta tenderia a injetar estrutura sazonal nos resíduos e agravar o próprio diagnóstico de autocorrelação que se quer corrigir. A série ajustada evita esse efeito sem prejuízo para a análise de longo prazo, que é uma propriedade de frequência zero.
 
-# 11. Referências
+As dummies entravam como controles determinísticos, sem alterar a dimensão do sistema. O IBC-Br é uma *variável endógena estocástica*: a atividade pressiona preços pelo lado da demanda e reage à política monetária. Por isso ele entra dentro do vetor endógeno, elevando o sistema de três para quatro variáveis e re-interando a seleção de defasagem, o teste de Johansen e a estimação do VECM. O método de diagnóstico utilizado foi idêntico ao das seções anteriores: Portmanteau ajustado com `lags.pt = 12`, para que as estatísticas sejam comparáveis ao longo de toda a escada de especificações.
+
+
+```{r item10-ibcbr-integracao, include=TRUE, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+# ============================================================
+# 10. VECM com atividade real (IBC-Br) — modificação incremental
+# ============================================================
+# O IBC-Br (SGS 24364, dessazonalizado) entra como 4a variavel
+# ENDOGENA do sistema (nao como dumvar): atividade real e I(1) e
+# co-move com precos/juros. Isso eleva k de 3 para 4 e re-dispara
+# selecao de defasagem, Johansen (rank) e VECM. Diagnostico de
+# autocorrelacao mantido identico (Portmanteau, lags.pt = 12).
+
+s_ibcbr <- df$log_ibcbr
+
+# --- (i) ordem de integracao do log(IBC-Br): pre-requisito para o VECM ---
+adf_ibc_trend <- ur.df(s_ibcbr,        type = "trend", selectlags = "AIC")
+adf_ibc_drift <- ur.df(diff(s_ibcbr),  type = "drift", selectlags = "AIC")
+kpss_ibc_n    <- ur.kpss(s_ibcbr,      type = "mu")
+kpss_ibc_d    <- ur.kpss(diff(s_ibcbr),type = "mu")
+
+tab_ibc_int <- data.frame(
+  Serie = c("log(IBC-Br) — nivel (ADF trend)",
+            "log(IBC-Br) — 1a dif. (ADF drift)",
+            "log(IBC-Br) — nivel (KPSS)",
+            "log(IBC-Br) — 1a dif. (KPSS)"),
+  Estatistica = round(c(adf_ibc_trend@teststat[1], adf_ibc_drift@teststat[1],
+                        kpss_ibc_n@teststat[1],     kpss_ibc_d@teststat[1]), 4),
+  `CV 5%` = round(c(adf_ibc_trend@cval[1, "5pct"], adf_ibc_drift@cval[1, "5pct"],
+                    kpss_ibc_n@cval[1, "5pct"],    kpss_ibc_d@cval[1, "5pct"]), 3),
+  check.names = FALSE
+)
+knitr::kable(tab_ibc_int, row.names = FALSE,
+             caption = "IBC-Br: ordem de integracao (ADF: H0 raiz unitaria; KPSS: H0 estacionariedade)")
+```
+
+A tabela acima confirma o pré-requisito para incluir o IBC-Br num sistema cointegrado: em nível, o ADF não rejeita a raiz unitária e o KPSS rejeita a estacionariedade; em primeira diferença, os sinais se invertem. O `log(IBC-Br)` é, portanto, I(1), da mesma ordem das demais variáveis, e pode entrar no vetor de cointegração em vez de figurar apenas em diferença.
+
+```{r item10-ibcbr-modelo, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
+# --- (ii) sistema de 4 variaveis: IBC-Br endogeno ---
+Y_ibc <- data.frame(
+  log_ipca_indice = s_ipca,
+  log_cambio      = s_cambio,
+  selic           = s_selic,
+  log_ibcbr       = s_ibcbr
+)
+
+var_sel_ibc <- VARselect(Y_ibc, lag.max = 12, type = "const")
+K_ibc       <- max(as.integer(var_sel_ibc$selection["AIC(n)"]), 2)
+
+jo_ibc <- ca.jo(Y_ibc, type = "trace", K = K_ibc,
+                ecdet = "const", spec = "longrun")
+rank_ibc       <- sum(jo_ibc@teststat > jo_ibc@cval[, "5pct"])
+rank_ibc_usado <- max(min(rank_ibc, ncol(Y_ibc) - 1), 1)
+
+vecm_ibc_as_var <- vec2var(jo_ibc, r = rank_ibc_usado)
+pt_vecm_ibc     <- serial.test(vecm_ibc_as_var, lags.pt = 12, type = "PT.adjusted")
+
+# pass-through de longo prazo: beta_1 normalizado em log(IPCA)
+pt_coef <- function(jo, j = 1) {
+  b  <- jo@V[, j]; rn <- rownames(jo@V)
+  bi <- b[grep("^log_ipca",   rn)[1]]
+  bc <- b[grep("^log_cambio", rn)[1]]
+  as.numeric(-(bc / bi))
+}
+passthrough_ibc <- pt_coef(jo_ibc, 1)
+
+# --- (iii) etapa seguinte do feedback: remover a Selic ---
+Y_sem <- data.frame(
+  log_ipca_indice = s_ipca,
+  log_cambio      = s_cambio,
+  log_ibcbr       = s_ibcbr
+)
+var_sel_sem <- VARselect(Y_sem, lag.max = 12, type = "const")
+K_sem       <- max(as.integer(var_sel_sem$selection["AIC(n)"]), 2)
+jo_sem      <- ca.jo(Y_sem, type = "trace", K = K_sem,
+                     ecdet = "const", spec = "longrun")
+rank_sem       <- sum(jo_sem@teststat > jo_sem@cval[, "5pct"])
+rank_sem_usado <- max(min(rank_sem, ncol(Y_sem) - 1), 1)
+vecm_sem_as_var <- vec2var(jo_sem, r = rank_sem_usado)
+pt_vecm_sem     <- serial.test(vecm_sem_as_var, lags.pt = 12, type = "PT.adjusted")
+passthrough_sem <- pt_coef(jo_sem, 1)
+```
+
+Com o IBC-Br no sistema, o teste de Johansen seleciona rank `r rank_ibc_usado` e o vetor de cointegração normalizado em log(IPCA) devolve um pass-through cambial de longo prazo de `r fmt(passthrough_ibc, 2)`. O coeficiente do câmbio permanece próximo do ~0,50 da especificação base, agora condicionando à atividade real: a leitura central do trabalho, repasse cambial de meia-magnitude no longo prazo, é robusta ao controle pelo produto.
+
+```{r item10-escada, include=TRUE, echo=FALSE, message=FALSE, warning=FALSE}
+# Escada completa de tentativas de correcao da autocorrelacao
+pvals_escada <- c(extrair_pval(pt_vecm$serial),
+                  extrair_pval(pt_vecm6$serial),
+                  extrair_pval(pt_vecm_dum$serial),
+                  extrair_pval(pt_vecm_ibc$serial),
+                  extrair_pval(pt_vecm_sem$serial))
+
+tab_escada <- data.frame(
+  `Especificacao` = c("VECM-base", "VECM com K = 6",
+                      "VECM + dummies de intervencao",
+                      "VECM + IBC-Br (atividade real)",
+                      "VECM + IBC-Br, sem Selic"),
+  `k` = c(3, 3, 3, 4, 3),
+  `Rank` = c(rank_coint, rank_coint, rank_dum_usado,
+             rank_ibc_usado, rank_sem_usado),
+  `Portmanteau` = round(c(extrair_stat(pt_vecm$serial),
+                          extrair_stat(pt_vecm6$serial),
+                          extrair_stat(pt_vecm_dum$serial),
+                          extrair_stat(pt_vecm_ibc$serial),
+                          extrair_stat(pt_vecm_sem$serial)), 2),
+  `p-valor` = round(pvals_escada, 4),
+  `Diagnostico` = vapply(pvals_escada, function(p)
+    ifelse(p < 0.05, "rejeita ruido branco", "nao rejeita ruido branco"),
+    character(1)),
+  check.names = FALSE
+)
+
+knitr::kable(
+  tab_escada,
+  caption = "Escada de tentativas de correcao: Portmanteau ajustado (lags.pt = 12) por especificacao",
+  row.names = FALSE,
+  align = c("l", "c", "c", "r", "r", "l")
+)
+```
+
+Consolida-se acima todas as tentativas de tratar a autocorrelação. A inclusão do IBC-Br `r ifelse(extrair_pval(pt_vecm_ibc$serial) < 0.05, "não elimina a rejeição da hipótese de ruído branco pelo Portmanteau", "leva o Portmanteau a não mais rejeitar a hipótese de ruído branco")`; e a remoção subsequente da Selic (dado o caráter notoriamente persistente da taxa de juros) `r ifelse(extrair_pval(pt_vecm_sem$serial) < 0.05, "também não resolve o problema", "produz resíduos compatíveis com ruído branco")`. 
+
+`r if (extrair_pval(pt_vecm_ibc$serial) < 0.05 && extrair_pval(pt_vecm_sem$serial) < 0.05) "O quadro que emerge é coerente com o diagnóstico já construído nas Seções 8 e 9: a autocorrelação residual da amostra cheia decorre menos de defasagem ou de uma variável omitida pontual, e mais de instabilidade de parâmetros ao longo de um período que atravessa o boom de commodities, a recessão de 2015-2016 e a pandemia. Nenhuma das extensões testadas — mais defasagens, dummies de choque, atividade real ou a retirada da Selic — torna o sistema de parâmetros fixos bem especificado em toda a amostra. Conforme a própria orientação recebida, registramos essas tentativas e tratamos os resultados de longo prazo com a devida cautela: o pass-through de meia-magnitude permanece a leitura central e é corroborado pela IRF acumulada e pela análise por regimes, mas as estatísticas de um modelo único e linear sobre 2003-2025 devem ser interpretadas como aproximações sujeitas à mudança de regime documentada." else "A modificação melhora o diagnóstico de autocorrelação em relação à especificação base, sustentando que parte da má especificação decorria da ausência de uma medida de atividade real no sistema."`
+
+Portanto, em qualquer caso, preservamos o modelo base das seções anteriores intacto. O IBC-Br, nesse caso, é como uma extensão incremental, na linha das sugestões de especificação que denotamos na seção 9, e não como substituição do sistema de três variáveis adotado como referência.
+
+# 11. Conclusão
+
+O trabalho documentou empiricamente o canal cambial de transmissão de choques para a inflação no Brasil sob o regime de metas de inflação (jan/2003–dez/2025). Os resultados principais são: (i) as três séries — log(IPCA), log(câmbio) e Selic — são classificadas como I(1) com base no procedimento sequencial do ADF e no complemento do KPSS, sem depender circularmente do Johansen para justificar a ordem de integração da Selic; (ii) o teste Zivot-Andrews confirma a não estacionariedade em nível mesmo na presença de quebras estruturais endógenas (nov/2014, jun/2004, mai/2017); (iii) o Engle-Granger, corrigido com valores críticos de MacKinnon para $k = 3$, não rejeita H0 de ausência de cointegração, enquanto o Johansen — teste mais adequado para sistemas multivariados com possibilidade de múltiplos vetores — indica cointegração e sustenta a estimação do VECM; ; (iv) no VECM, o vetor de cointegração normalizado em log(IPCA) estima um coeficiente de longo prazo de aproximadamente 0,50 para o câmbio, e a IRF acumulada do VECM via `vec2var` permite recuperar o canal de nível que o VAR em diferenças remove; (v) a análise por subamostras mostra que o pass-through de 0,50 da amostra cheia mascara forte heterogeneidade — nulo no período de apreciação pré-2015, $≈0,54$ no pós-2015 (única janela bem especificada, que seleciona rank 1) — evidenciando que a autocorrelação residual decorre em boa parte de instabilidade de parâmetros; (vi) como extensão incremental, a inclusão do IBC-Br como quarta variável endógena e a subsequente retirada da Selic — modificações de especificação sugeridas para tratar a autocorrelação — mantêm o pass-through de longo prazo próximo de 0,50, mas, conforme reportado na Seção 10, não tornam o modelo de parâmetros fixos plenamente bem especificado em toda a amostra, reforçando a leitura por instabilidade de regime e a recomendação de cautela na interpretação
+
+# 12. Referências
 
 - BELAISCH, A. Exchange rate pass-through in Brazil. IMF Working Paper, 2003.
 - GONÇALVES, C.; CERQUEIRA, V.; FEIJÓ, F. Pass-through of exchange rate shocks in Brazil as a small open economy. CEPAL, 2016.
@@ -1254,4 +1397,4 @@ O trabalho documentou empiricamente o canal cambial de transmissão de choques p
 - SIMS, C. A. Macroeconomics and reality. *Econometrica*, 1980.
 - ZIVOT, E.; ANDREWS, D. W. K. Further evidence on the great crash, the oil-price shock, and the unit-root hypothesis. *Journal of Business & Economic Statistics*, 1992.
 - IBGE. Sistema SIDRA, Tabela 1737 — IPCA. https://sidra.ibge.gov.br/
-- BCB. Sistema SGS — Séries 432 e 3698. https://www3.bcb.gov.br/sgspub/
+- BCB. Sistema SGS — Séries 432 (Selic), 3698 (câmbio) e 24364 (IBC-Br dessazonalizado). https://www3.bcb.gov.br/sgspub/

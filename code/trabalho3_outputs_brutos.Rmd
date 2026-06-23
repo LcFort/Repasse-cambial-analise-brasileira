@@ -1,0 +1,839 @@
+---
+title: "Trabalho 3 de Macroeconometria — Anexo de Outputs Brutos"
+subtitle: "Pass-through cambial e política monetária no Brasil — VAR/VECM"
+author: |
+  | Alunos: Guilherme Santos de Carvalho e Lucas Fortuna Arantes Junqueira
+  | Professora: Susan Schommer
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: true
+    number_sections: false
+fontsize: 9pt
+geometry: margin=1in
+date: "Maio de 2026"
+---
+
+```{r setup, include=FALSE}
+# Anexo de OUTPUTS BRUTOS do paper trabalho3_econometria.Rmd.
+# Mesmo pipeline, mesmos dados, transformações, parâmetros e ordem;
+# aqui imprime-se a saída crua do R (print/summary/cat) em vez das
+# tabelas formatadas (kable/gt/flextable são PROIBIDOS neste anexo).
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  include = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center",
+  fig.width = 10,
+  fig.height = 6,
+  out.width = "95%"
+)
+
+source("_master.R")
+options(scipen = 999)
+
+# Parâmetros idênticos ao paper (trabalho3_econometria.Rmd)
+DATA_INICIAL <- as.Date("2003-01-01")
+DATA_FINAL   <- as.Date("2025-12-01")
+
+HORIZONTE_IR <- 24
+N_BOOT       <- 500
+
+ORDEM_ECON <- c("log_cambio", "log_ipca_indice", "selic")
+ORDEM_CONT <- rev(ORDEM_ECON)   # selic -> log_ipca_indice -> log_cambio
+
+# Semente fixa global; cada bootstrap reafirma set.seed() antes da chamada.
+SEED <- 123
+set.seed(SEED)
+```
+
+Este documento é o **anexo de outputs brutos** entregue à professora. Ele reexecuta,
+linha a linha, o mesmo pipeline econométrico de `trabalho3_econometria.Rmd` — mesmos
+dados, transformações, parâmetros (Johansen $K$ pelo AIC, VAR $p$ pelo AIC,
+`lags.pt = 12`, CVs de MacKinnon $k=3$ no Engle-Granger, ZA modelo `both`) e mesma
+ordem das seções do paper —, porém imprimindo a saída crua do console R
+(`print()`, `summary()`, `cat()`) em vez das tabelas formatadas. Nenhum parâmetro
+foi reotimizado. Toda rotina com bootstrap é precedida de `set.seed()` fixo para
+reprodutibilidade das bandas.
+
+# 1. Carga, transformações e estatísticas descritivas
+
+```{r dados}
+## --- etapa 1: carga e transformações das séries ---
+# IPCA — índice histórico IBGE/SIDRA (série 1737)
+ipca <- readxl::read_xlsx(file.path(pasta_input, "ipca_sidra_1737.xlsx"))
+names(ipca) <- c("data", "mes", "valor")
+ipca$data  <- as.Date(ipca$data)
+ipca$valor <- as.numeric(ipca$valor)
+ipca <- ipca %>%
+  mutate(data = as.Date(format(data, "%Y-%m-01"))) %>%
+  filter(!is.na(data), !is.na(valor),
+         data >= DATA_INICIAL, data <= DATA_FINAL)
+
+# Câmbio R$/US$ — BCB/SGS 3698 (mensal)
+cambio_raw <- read.csv2(file.path(pasta_input, "cambio_sgs_3698.csv"),
+                        quote = "\"", stringsAsFactors = FALSE)
+names(cambio_raw) <- c("data", "valor")
+cambio_raw$data  <- as.Date(cambio_raw$data, format = "%d/%m/%Y")
+cambio_raw$valor <- as.numeric(gsub(",", ".", cambio_raw$valor))
+cambio <- cambio_raw %>% filter(data >= DATA_INICIAL, data <= DATA_FINAL)
+
+# Selic meta — BCB/SGS 432 (diária -> mensal, último valor do mês)
+selic_raw <- read.csv2(file.path(pasta_input, "selic_sgs_432.csv"),
+                       stringsAsFactors = FALSE)
+names(selic_raw) <- c("data", "valor")
+selic_raw$data  <- as.Date(selic_raw$data, format = "%d/%m/%Y")
+selic_raw$valor <- as.numeric(gsub(",", ".", selic_raw$valor))
+selic_raw <- selic_raw %>% filter(!is.na(data), !is.na(valor))
+selic_raw$mes <- format(selic_raw$data, "%Y-%m-01")
+selic <- selic_raw %>%
+  group_by(mes) %>%
+  summarise(valor = last(valor), .groups = "drop") %>%
+  mutate(data = as.Date(mes)) %>%
+  filter(data >= DATA_INICIAL, data <= DATA_FINAL) %>%
+  dplyr::select(data, valor)
+
+# IBC-Br dessazonalizado — BCB/SGS 24364 (mensal)
+ibcbr_raw <- read.csv2(file.path(pasta_input, "ibcbr_sgs_24364.csv"),
+                       quote = "\"", stringsAsFactors = FALSE)
+names(ibcbr_raw) <- c("data", "valor")
+ibcbr_raw$data  <- as.Date(ibcbr_raw$data, format = "%d/%m/%Y")
+ibcbr_raw$valor <- as.numeric(gsub(",", ".", ibcbr_raw$valor))
+ibcbr <- ibcbr_raw %>% filter(data >= DATA_INICIAL, data <= DATA_FINAL)
+
+# Base alinhada (interseção das datas)
+df <- Reduce(function(a, b) merge(a, b, by = "data", all = FALSE),
+             list(
+               data.frame(data = ipca$data,  ipca_indice = ipca$valor),
+               data.frame(data = cambio$data, cambio     = cambio$valor),
+               data.frame(data = selic$data,  selic      = selic$valor),
+               data.frame(data = ibcbr$data,  ibcbr      = ibcbr$valor)
+             ))
+
+# Transformações: log(IPCA), log(câmbio), log(IBC-Br); Selic em nível
+df$log_ipca_indice <- log(df$ipca_indice)
+df$log_cambio      <- log(df$cambio)
+df$log_ibcbr       <- log(df$ibcbr)
+
+cat("Observações:", nrow(df), "| De:", format(min(df$data)),
+    "a:", format(max(df$data)), "\n")
+str(df)
+```
+
+```{r descritivas}
+## --- etapa 1: estatísticas descritivas cruas ---
+vars_transf <- df[, c("log_ipca_indice", "log_cambio", "selic")]
+
+estat <- data.frame(
+  variavel = names(vars_transf),
+  n        = sapply(vars_transf, length),
+  media    = sapply(vars_transf, mean),
+  dp       = sapply(vars_transf, sd),
+  min      = sapply(vars_transf, min),
+  max      = sapply(vars_transf, max),
+  row.names = NULL
+)
+cat("Estatísticas descritivas das séries transformadas:\n")
+print(estat)
+
+cat("\nsummary() base das séries transformadas:\n")
+print(summary(vars_transf))
+```
+
+# 2. Gráficos em nível e 1ª diferença
+
+```{r graficos-nivel-diferenca, fig.width=10, fig.height=8}
+## --- etapa 2: gráficos em nível e 1ª diferença das 3 séries ---
+s_ipca   <- df$log_ipca_indice
+s_cambio <- df$log_cambio
+s_selic  <- df$selic
+
+par(mfrow = c(3, 2), mar = c(4, 4, 3, 1))
+
+plot(df$data, s_ipca, type = "l", lwd = 1.3,
+     main = "log(IPCA-índice) — nível", xlab = "", ylab = "valor")
+plot(df$data[-1], diff(s_ipca), type = "l", lwd = 1,
+     main = "log(IPCA-índice) — 1ª diferença", xlab = "", ylab = "delta")
+abline(h = 0, lty = 2)
+
+plot(df$data, s_cambio, type = "l", lwd = 1.3,
+     main = "log(Câmbio R$/US$) — nível", xlab = "", ylab = "valor")
+plot(df$data[-1], diff(s_cambio), type = "l", lwd = 1,
+     main = "log(Câmbio R$/US$) — 1ª diferença", xlab = "", ylab = "delta")
+abline(h = 0, lty = 2)
+
+plot(df$data, s_selic, type = "l", lwd = 1.3,
+     main = "Selic meta (% a.a.) — nível", xlab = "", ylab = "valor")
+plot(df$data[-1], diff(s_selic), type = "l", lwd = 1,
+     main = "Selic meta — 1ª diferença", xlab = "", ylab = "delta")
+abline(h = 0, lty = 2)
+```
+
+# 3. Testes de raiz unitária — ADF e KPSS
+
+```{r adf-kpss-calc}
+## --- etapa 3: ADF (none/trend/drift, lag por AIC) e KPSS ---
+# ADF em NÍVEL — sem constante/tendência (none)
+adf_ipca_n <- ur.df(s_ipca,   type = "none", selectlags = "AIC")
+adf_cam_n  <- ur.df(s_cambio, type = "none", selectlags = "AIC")
+adf_sel_n  <- ur.df(s_selic,  type = "none", selectlags = "AIC")
+
+# ADF em NÍVEL — com constante e tendência (trend)
+adf_ipca_n_trend <- ur.df(s_ipca,   type = "trend", selectlags = "AIC")
+adf_cam_n_trend  <- ur.df(s_cambio, type = "trend", selectlags = "AIC")
+adf_sel_n_trend  <- ur.df(s_selic,  type = "trend", selectlags = "AIC")
+
+# Selic em NÍVEL — com constante (drift), apenas complementar
+adf_sel_drift <- ur.df(s_selic, type = "drift", selectlags = "AIC")
+
+# ADF em PRIMEIRA DIFERENÇA — com constante (drift)
+adf_ipca_d <- ur.df(diff(s_ipca),   type = "drift", selectlags = "AIC")
+adf_cam_d  <- ur.df(diff(s_cambio), type = "drift", selectlags = "AIC")
+adf_sel_d  <- ur.df(diff(s_selic),  type = "drift", selectlags = "AIC")
+
+# KPSS (H0: estacionariedade), nível e 1ª diferença
+kpss_ipca_n <- ur.kpss(s_ipca,   type = "mu")
+kpss_cam_n  <- ur.kpss(s_cambio, type = "mu")
+kpss_sel_n  <- ur.kpss(s_selic,  type = "mu")
+kpss_ipca_d <- ur.kpss(diff(s_ipca),   type = "mu")
+kpss_cam_d  <- ur.kpss(diff(s_cambio), type = "mu")
+kpss_sel_d  <- ur.kpss(diff(s_selic),  type = "mu")
+```
+
+## 3.1 ADF — saída crua (nível, none)
+
+```{r adf-none-raw}
+cat("===== ADF log(IPCA) — nível (none) =====\n");   summary(adf_ipca_n)
+cat("\n===== ADF log(Câmbio) — nível (none) =====\n"); summary(adf_cam_n)
+cat("\n===== ADF Selic — nível (none) =====\n");       summary(adf_sel_n)
+```
+
+## 3.2 ADF — saída crua (nível, trend)
+
+```{r adf-trend-raw}
+cat("===== ADF log(IPCA) — nível (trend) =====\n");   summary(adf_ipca_n_trend)
+cat("\n===== ADF log(Câmbio) — nível (trend) =====\n"); summary(adf_cam_n_trend)
+cat("\n===== ADF Selic — nível (trend) =====\n");       summary(adf_sel_n_trend)
+cat("\n===== ADF Selic — nível (drift; complementar) =====\n"); summary(adf_sel_drift)
+```
+
+## 3.3 ADF — saída crua (1ª diferença, drift)
+
+```{r adf-diff-raw}
+cat("===== ADF log(IPCA) — 1ª dif. (drift) =====\n");   summary(adf_ipca_d)
+cat("\n===== ADF log(Câmbio) — 1ª dif. (drift) =====\n"); summary(adf_cam_d)
+cat("\n===== ADF Selic — 1ª dif. (drift) =====\n");       summary(adf_sel_d)
+```
+
+## 3.4 KPSS — saída crua
+
+```{r kpss-raw}
+cat("===== KPSS log(IPCA) — nível =====\n");   summary(kpss_ipca_n)
+cat("\n===== KPSS log(Câmbio) — nível =====\n"); summary(kpss_cam_n)
+cat("\n===== KPSS Selic — nível =====\n");       summary(kpss_sel_n)
+cat("\n===== KPSS log(IPCA) — 1ª dif. =====\n"); summary(kpss_ipca_d)
+cat("\n===== KPSS log(Câmbio) — 1ª dif. =====\n"); summary(kpss_cam_d)
+cat("\n===== KPSS Selic — 1ª dif. =====\n");     summary(kpss_sel_d)
+```
+
+# 4. Zivot-Andrews (quebra estrutural endógena)
+
+```{r za-calc}
+## --- etapa 4: Zivot-Andrews modelo both, lag NULL e lag 1 ---
+# NÍVEL — lag NULL
+za_ipca_n <- ur.za(ts(s_ipca),   model = "both", lag = NULL)
+za_cam_n  <- ur.za(ts(s_cambio), model = "both", lag = NULL)
+za_sel_n  <- ur.za(ts(s_selic),  model = "both", lag = NULL)
+# NÍVEL — lag 1
+za_ipca_n_1 <- ur.za(ts(s_ipca),   model = "both", lag = 1)
+za_cam_n_1  <- ur.za(ts(s_cambio), model = "both", lag = 1)
+za_sel_n_1  <- ur.za(ts(s_selic),  model = "both", lag = 1)
+# 1ª DIFERENÇA — lag NULL
+za_ipca_d <- ur.za(ts(diff(s_ipca)),   model = "both", lag = NULL)
+za_cam_d  <- ur.za(ts(diff(s_cambio)), model = "both", lag = NULL)
+za_sel_d  <- ur.za(ts(diff(s_selic)),  model = "both", lag = NULL)
+# 1ª DIFERENÇA — lag 1
+za_ipca_d_1 <- ur.za(ts(diff(s_ipca)),   model = "both", lag = 1)
+za_cam_d_1  <- ur.za(ts(diff(s_cambio)), model = "both", lag = 1)
+za_sel_d_1  <- ur.za(ts(diff(s_selic)),  model = "both", lag = 1)
+
+cat("CV 5% tabelado (Zivot & Andrews, 1992; modelo 'both'): -5.08\n")
+cat("Datas amostrais para mapear o ponto de quebra (@bpoint):\n")
+cat("  nível: df$data[1] =", format(df$data[1]),
+    "... df$data[", nrow(df), "] =", format(df$data[nrow(df)]), "\n")
+```
+
+## 4.1 ZA — nível (lag NULL e lag 1)
+
+```{r za-nivel-raw}
+cat("===== ZA log(IPCA) nível (lag NULL) =====\n");   summary(za_ipca_n)
+cat("\n===== ZA log(Câmbio) nível (lag NULL) =====\n"); summary(za_cam_n)
+cat("\n===== ZA Selic nível (lag NULL) =====\n");       summary(za_sel_n)
+cat("\n===== ZA log(IPCA) nível (lag 1) =====\n");      summary(za_ipca_n_1)
+cat("\n===== ZA log(Câmbio) nível (lag 1) =====\n");    summary(za_cam_n_1)
+cat("\n===== ZA Selic nível (lag 1) =====\n");          summary(za_sel_n_1)
+```
+
+## 4.2 ZA — 1ª diferença (lag NULL e lag 1)
+
+```{r za-diff-raw}
+cat("===== ZA log(IPCA) 1ª dif. (lag NULL) =====\n");   summary(za_ipca_d)
+cat("\n===== ZA log(Câmbio) 1ª dif. (lag NULL) =====\n"); summary(za_cam_d)
+cat("\n===== ZA Selic 1ª dif. (lag NULL) =====\n");       summary(za_sel_d)
+cat("\n===== ZA log(IPCA) 1ª dif. (lag 1) =====\n");      summary(za_ipca_d_1)
+cat("\n===== ZA log(Câmbio) 1ª dif. (lag 1) =====\n");    summary(za_cam_d_1)
+cat("\n===== ZA Selic 1ª dif. (lag 1) =====\n");          summary(za_sel_d_1)
+```
+
+# 5. Engle-Granger
+
+```{r eg-calc}
+## --- etapa 5: Engle-Granger — 3 regressões OLS + ADF nos resíduos ---
+Y <- data.frame(
+  log_ipca_indice = s_ipca,
+  log_cambio      = s_cambio,
+  selic           = s_selic
+)
+
+eg_ipca   <- lm(log_ipca_indice ~ log_cambio + selic, data = Y)
+eg_cambio <- lm(log_cambio ~ log_ipca_indice + selic, data = Y)
+eg_selic  <- lm(selic ~ log_ipca_indice + log_cambio, data = Y)
+
+# ADF nos resíduos (none). CVs corretos = MacKinnon (1996), k = 3, com constante.
+adf_eg_ipca <- ur.df(residuals(eg_ipca),   type = "none", selectlags = "AIC")
+adf_eg_cam  <- ur.df(residuals(eg_cambio), type = "none", selectlags = "AIC")
+adf_eg_sel  <- ur.df(residuals(eg_selic),  type = "none", selectlags = "AIC")
+
+cv_eg <- c("1pct" = -4.29, "5pct" = -3.74, "10pct" = -3.45)
+cat("Valores críticos de MacKinnon (1996) — Engle-Granger, k = 3, com constante:\n")
+print(cv_eg)
+```
+
+## 5.1 Regressões OLS de cointegração — summary cru
+
+```{r eg-ols-raw}
+cat("===== EG: log(IPCA) ~ log(Câmbio) + Selic =====\n"); summary(eg_ipca)
+cat("\n===== EG: log(Câmbio) ~ log(IPCA) + Selic =====\n"); summary(eg_cambio)
+cat("\n===== EG: Selic ~ log(IPCA) + log(Câmbio) =====\n"); summary(eg_selic)
+```
+
+## 5.2 ADF nos resíduos — summary cru (ler contra MacKinnon)
+
+```{r eg-adf-raw}
+cat("===== ADF resíduos — dep. log(IPCA) =====\n")
+summary(adf_eg_ipca)
+cat("estatística tau1:", round(adf_eg_ipca@teststat["statistic","tau1"], 4),
+    "| CV 5% MacKinnon:", cv_eg["5pct"], "\n")
+
+cat("\n===== ADF resíduos — dep. log(Câmbio) =====\n")
+summary(adf_eg_cam)
+cat("estatística tau1:", round(adf_eg_cam@teststat["statistic","tau1"], 4),
+    "| CV 5% MacKinnon:", cv_eg["5pct"], "\n")
+
+cat("\n===== ADF resíduos — dep. Selic =====\n")
+summary(adf_eg_sel)
+cat("estatística tau1:", round(adf_eg_sel@teststat["statistic","tau1"], 4),
+    "| CV 5% MacKinnon:", cv_eg["5pct"], "\n")
+```
+
+# 6. Johansen
+
+```{r johansen-calc}
+## --- etapa 6: Johansen — seleção de defasagem e ca.jo (traço e máx autovalor) ---
+var_sel <- VARselect(Y, lag.max = 12, type = "const")
+K_opt   <- max(as.integer(var_sel$selection["AIC(n)"]), 2)
+cat("Defasagem selecionada (AIC) para Johansen: K =", K_opt, "\n\n")
+cat("Critérios de informação (VARselect):\n")
+print(var_sel$selection)
+
+jo_trace <- ca.jo(Y, type = "trace", K = K_opt,
+                  ecdet = "const", spec = "longrun")
+jo_eigen <- ca.jo(Y, type = "eigen", K = K_opt,
+                  ecdet = "const", spec = "longrun")
+
+rank_trace_5 <- sum(jo_trace@teststat > jo_trace@cval[, "5pct"])
+rank_eigen_5 <- sum(jo_eigen@teststat > jo_eigen@cval[, "5pct"])
+cat("\nRank pelo traço a 5%:", rank_trace_5,
+    "| Rank pelo máximo autovalor a 5%:", rank_eigen_5, "\n")
+```
+
+## 6.1 Johansen por traço — summary cru (autovetores e loadings)
+
+```{r johansen-trace-raw}
+summary(jo_trace)
+```
+
+## 6.2 Johansen por máximo autovalor — summary cru
+
+```{r johansen-eigen-raw}
+summary(jo_eigen)
+```
+
+# 7. VAR em 1ª diferença
+
+```{r var-calc}
+## --- etapa 7: VAR em 1ª diferença — seleção de p e estimação ---
+dY <- data.frame(
+  log_cambio      = diff(s_cambio),
+  log_ipca_indice = diff(s_ipca),
+  selic           = diff(s_selic)
+)
+dY_econ <- dY[, ORDEM_ECON]   # câmbio -> IPCA -> Selic
+
+sel_var <- VARselect(dY_econ, lag.max = 12, type = "const")
+p_var   <- max(as.integer(sel_var$selection["AIC(n)"]), 1)
+
+cat("Ordem das variáveis no VAR:",
+    paste(colnames(dY_econ), collapse = " -> "), "\n")
+cat("Defasagem selecionada pelo AIC: p =", p_var, "\n\n")
+cat("Critérios de informação (VARselect):\n")
+print(sel_var$selection)
+
+var_fit <- VAR(dY_econ, p = p_var, type = "const")
+```
+
+## 7.1 summary(VAR) — saída crua
+
+```{r var-summary-raw}
+summary(var_fit)
+```
+
+## 7.2 Matrizes de covariância e correlação dos resíduos
+
+```{r var-resid-matrices}
+sv <- summary(var_fit)
+cat("Matriz de covariância dos resíduos:\n")
+print(round(sv$covres, 6))
+cat("\nMatriz de correlação dos resíduos:\n")
+print(round(sv$corres, 4))
+```
+
+# 8. IRFs ortogonalizadas, FEVD e IRF acumulada do VECM
+
+## 8.1 IRF — ordenação econômica (câmbio → IPCA → Selic)
+
+```{r irf-econ, fig.width=10, fig.height=8}
+## --- etapa 8: IRF VAR ortogonalizada, ordenação econômica ---
+set.seed(SEED)
+irf_econ <- irf(var_fit, n.ahead = HORIZONTE_IR,
+                ortho = TRUE, boot = TRUE, runs = N_BOOT, ci = 0.95)
+plot(irf_econ,
+     main = "IRF ortogonalizada — ordenação econômica: câmbio -> IPCA -> Selic")
+```
+
+## 8.2 IRF — ordenação contrária (Selic → IPCA → câmbio)
+
+```{r irf-cont, fig.width=10, fig.height=8}
+## --- etapa 8: IRF VAR ortogonalizada, ordenação contrária (robustez) ---
+dY_cont  <- dY[, ORDEM_CONT]
+var_cont <- VAR(dY_cont, p = p_var, type = "const")
+
+set.seed(SEED)
+irf_cont <- irf(var_cont, n.ahead = HORIZONTE_IR,
+                ortho = TRUE, boot = TRUE, runs = N_BOOT, ci = 0.95)
+plot(irf_cont,
+     main = "IRF ortogonalizada — ordenação contrária: Selic -> IPCA -> câmbio")
+```
+
+## 8.3 FEVD do IPCA
+
+```{r fevd-ipca, fig.width=10, fig.height=6}
+## --- etapa 8: FEVD do VAR (em diferença) ---
+fevd_var <- fevd(var_fit, n.ahead = HORIZONTE_IR)
+cat("===== FEVD (VAR) — fração da variância de previsão do IPCA por choque =====\n")
+print(round(fevd_var$log_ipca_indice, 4))
+
+op <- par(no.readonly = TRUE)
+par(mar = c(4, 4, 3, 8), xpd = TRUE)
+plot(fevd_var, main = "Decomposição da variância (FEVD) — VAR em diferença",
+     col = c("steelblue", "tomato3", "darkgreen"), legend = FALSE)
+legend("right", inset = c(-0.18, 0), legend = colnames(fevd_var[[1]]),
+       fill = c("steelblue", "tomato3", "darkgreen"), bty = "n", cex = 0.85, xpd = TRUE)
+par(op)
+```
+
+## 8.4 IRF acumulada do VECM via `vec2var` (choque no câmbio)
+
+```{r irf-vecm, fig.width=10, fig.height=6}
+## --- etapa 8: ca.jo -> vec2var -> irf acumulada (ordenação econômica) ---
+rank_coint <- max(sum(jo_trace@teststat > jo_trace@cval[, "5pct"]), 1)
+
+Y_econ_nivel  <- Y[, ORDEM_ECON]
+jo_trace_econ <- ca.jo(Y_econ_nivel, type = "trace", K = K_opt,
+                       ecdet = "const", spec = "longrun")
+vecm_var_econ <- vec2var(jo_trace_econ, r = rank_coint)
+
+set.seed(SEED)
+irf_vecm <- irf(vecm_var_econ, impulse = "log_cambio",
+                response = c("log_ipca_indice", "selic"),
+                n.ahead = HORIZONTE_IR, ortho = TRUE, boot = TRUE,
+                runs = N_BOOT, ci = 0.95, cumulative = TRUE)
+
+cat("===== IRF acumulada do VECM — choque em log_cambio (estimativa pontual) =====\n")
+print(round(irf_vecm$irf$log_cambio, 6))
+plot(irf_vecm, main = "IRF acumulada do VECM — choque em câmbio")
+```
+
+## 8.5 FEVD do IPCA pelo VECM e IRF acumulada sob ordenação invertida
+
+```{r fevd-vecm-e-rev, fig.width=10, fig.height=6}
+## --- etapa 8: FEVD do IPCA via VECM + robustez da ordenação ---
+fevd_obj <- fevd(vecm_var_econ, n.ahead = HORIZONTE_IR)
+cat("===== FEVD (VECM) — fração da variância de previsão do IPCA por choque =====\n")
+print(round(fevd_obj$log_ipca_indice, 4))
+
+# Ordenação invertida: Selic -> IPCA -> câmbio (câmbio mais endógeno)
+jo_trace_rev <- ca.jo(Y[, ORDEM_CONT], type = "trace", K = K_opt,
+                      ecdet = "const", spec = "longrun")
+vecm_var_rev <- vec2var(jo_trace_rev, r = rank_coint)
+
+set.seed(SEED)
+irf_cu_rev <- irf(vecm_var_rev, impulse = "log_cambio", response = "log_ipca_indice",
+                  n.ahead = HORIZONTE_IR, ortho = TRUE, boot = TRUE,
+                  runs = N_BOOT, ci = 0.95, cumulative = TRUE)
+cat("\nPass-through acumulado do IPCA em h=24 — baseline:",
+    round(tail(irf_vecm$irf$log_cambio[, "log_ipca_indice"], 1), 4),
+    "| invertida:",
+    round(tail(irf_cu_rev$irf$log_cambio[, "log_ipca_indice"], 1), 4), "\n")
+```
+
+# 9. Diagnósticos do VAR e do VECM
+
+## 9.1 Diagnósticos do VAR
+
+```{r diag-var}
+## --- etapa 9: diagnósticos do VAR ---
+pt_test   <- serial.test(var_fit, lags.pt = 12, type = "PT.adjusted")
+norm_test <- normality.test(var_fit)
+arch_var  <- arch.test(var_fit, lags.multi = 5, multivariate.only = TRUE)
+
+resid_var  <- residuals(var_fit)
+fitted_var <- fitted(var_fit)
+bp_results <- lapply(seq_len(ncol(resid_var)), function(i) {
+  lmtest::bptest(lm(resid_var[, i]^2 ~ fitted_var[, i] + I(fitted_var[, i]^2)))
+})
+names(bp_results) <- colnames(resid_var)
+
+cat("===== Portmanteau ajustado (VAR), lags.pt = 12 =====\n"); print(pt_test$serial)
+cat("\n===== Jarque-Bera multivariado (VAR) =====\n");          print(norm_test$jb.mul)
+cat("\n===== ARCH multivariado (VAR), lags.multi = 5 =====\n"); print(arch_var$arch.mul)
+
+cat("\n===== Breusch-Pagan por equação (VAR) =====\n")
+for (nm in names(bp_results)) { cat("\n", nm, "\n", sep = ""); print(bp_results[[nm]]) }
+
+cat("\n===== Raízes do polinômio característico (VAR) =====\n")
+print(round(roots(var_fit), 4))
+cat("Sistema VAR estável (todas as raízes < 1):", all(roots(var_fit) < 1), "\n")
+```
+
+## 9.2 Diagnósticos do VECM
+
+```{r diag-vecm}
+## --- etapa 9: diagnósticos do VECM (base e robustez K=6) ---
+vecm_as_var <- vec2var(jo_trace, r = rank_coint)
+
+pt_vecm   <- serial.test(vecm_as_var, lags.pt = 12, type = "PT.adjusted")
+norm_vecm <- normality.test(vecm_as_var)
+
+resid_vecm  <- residuals(vecm_as_var)
+fitted_vecm <- fitted(vecm_as_var)
+bp_vecm <- lapply(seq_len(ncol(resid_vecm)), function(i) {
+  lmtest::bptest(lm(resid_vecm[, i]^2 ~ fitted_vecm[, i] + I(fitted_vecm[, i]^2)))
+})
+names(bp_vecm) <- colnames(resid_vecm)
+
+# Raízes via matriz companheira
+A_mats <- vecm_as_var$A
+Kv <- vecm_as_var$K; pv <- vecm_as_var$p
+companion <- matrix(0, nrow = Kv * pv, ncol = Kv * pv)
+for (i in seq_len(pv)) companion[1:Kv, ((i-1)*Kv + 1):(i*Kv)] <- A_mats[[i]]
+if (pv > 1) companion[(Kv+1):(Kv*pv), 1:(Kv*(pv-1))] <- diag(Kv * (pv-1))
+raizes_vecm <- Mod(eigen(companion, only.values = TRUE)$values)
+
+# Robustez: VECM com K = 6
+jo_trace_6   <- ca.jo(Y, type = "trace", K = 6, ecdet = "const", spec = "longrun")
+vecm6_as_var <- vec2var(jo_trace_6, r = rank_coint)
+pt_vecm6     <- serial.test(vecm6_as_var, lags.pt = 12, type = "PT.adjusted")
+
+cat("===== Portmanteau ajustado (VECM-base), lags.pt = 12 =====\n"); print(pt_vecm$serial)
+cat("\n===== Portmanteau ajustado (VECM K = 6), lags.pt = 12 =====\n"); print(pt_vecm6$serial)
+cat("\n===== Jarque-Bera multivariado (VECM) =====\n");                print(norm_vecm$jb.mul)
+
+cat("\n===== Breusch-Pagan por equação (VECM) =====\n")
+for (nm in names(bp_vecm)) { cat("\n", nm, "\n", sep = ""); print(bp_vecm[[nm]]) }
+
+cat("\n===== Raízes (VECM) =====\n")
+print(round(sort(raizes_vecm, decreasing = TRUE), 4))
+cat("max|raiz| =", round(max(raizes_vecm), 4),
+    "| k - r =", ncol(Y) - rank_coint, "tendência(s) estocástica(s) comum(ns)\n")
+```
+
+## 9.3 Diagnóstico visual — ACF e QQ dos resíduos do VECM
+
+```{r diag-vecm-plots, fig.width=10, fig.height=6}
+nm <- colnames(resid_vecm)
+par(mfrow = c(2, 3), mar = c(4, 4, 2.5, 1))
+for (j in seq_len(ncol(resid_vecm)))
+  acf(resid_vecm[, j], lag.max = 24, main = paste("ACF —", nm[j]))
+for (j in seq_len(ncol(resid_vecm))) {
+  qqnorm(resid_vecm[, j], main = paste("QQ —", nm[j]), pch = 20, cex = 0.6, col = "#1f4e79")
+  qqline(resid_vecm[, j], col = "#c0392b", lwd = 1.4)
+}
+```
+
+## 9.4 VECM via `cajorls` — beta, alpha e summary cru
+
+```{r vecm-cajorls-raw}
+## --- etapa 9: estimação do VECM por cajorls (rank do traço) ---
+vecm_fit <- cajorls(jo_trace, r = rank_coint)
+
+cat("Rank de cointegração adotado:", rank_coint, "\n")
+cat("\n===== Vetor(es) de cointegração — beta =====\n")
+print(round(vecm_fit$beta, 4))
+
+alpha <- coef(vecm_fit$rlm)[1:rank_coint, , drop = FALSE]
+cat("\n===== Coeficientes de ajustamento — alpha =====\n")
+print(round(alpha, 4))
+
+cat("\n===== summary completo das equações do VECM (rlm) =====\n")
+summary(vecm_fit$rlm)
+```
+
+# 10. Pass-through por regime (VECM rank 1 imposto)
+
+```{r regimes-calc}
+## --- etapa 10: pass-through por regime (rank 1) + Portmanteau por subamostra ---
+estima_pt <- function(dados, ini, fim, K = K_opt, r = 1) {
+  sub <- dados[dados$data >= ini & dados$data <= fim, ]
+  Ys  <- as.matrix(sub[, c("log_ipca_indice", "log_cambio", "selic")])
+  Kx  <- min(K, max(2, floor(nrow(Ys) / 25)))
+  jo  <- ca.jo(Ys, type = "trace", K = Kx, ecdet = "const", spec = "longrun")
+  rank5 <- sum(jo@teststat > jo@cval[, "5pct"])
+  fit <- cajorls(jo, r = r)
+  pt  <- -fit$beta[paste0("log_cambio.l", Kx), 1]
+  p_port <- serial.test(vec2var(jo, r = r), lags.pt = 12,
+                        type = "PT.adjusted")$serial$p.value
+  data.frame(n = nrow(Ys), K = Kx, rank_traco_5 = rank5,
+             pass_through = round(pt, 3),
+             portmanteau_p = round(as.numeric(p_port), 4))
+}
+
+janelas <- list(
+  c("2003-01-01", "2025-12-01"),  # amostra cheia
+  c("2003-01-01", "2014-12-01"),  # pré-2015
+  c("2015-01-01", "2025-12-01"),  # pós-2015
+  c("2003-01-01", "2019-12-01"),  # pré-COVID
+  c("2020-01-01", "2025-12-01"))  # pós-COVID
+nomes_reg <- c("Amostra cheia", "Pré-2015", "Pós-2015", "Pré-COVID", "Pós-COVID")
+
+tab_sub <- do.call(rbind, lapply(janelas, function(j)
+  estima_pt(df, as.Date(j[1]), as.Date(j[2]))))
+tab_sub <- cbind(regime = nomes_reg,
+                 janela = sapply(janelas, function(j)
+                   paste0(substr(j[1], 1, 4), "-", substr(j[2], 1, 4))),
+                 tab_sub)
+
+cat("===== Pass-through de longo prazo por regime (VECM rank 1) =====\n")
+print(tab_sub, row.names = FALSE)
+```
+
+```{r regimes-plot, fig.width=9, fig.height=5}
+sub_reg <- tab_sub[tab_sub$regime != "Amostra cheia", ]
+bp <- barplot(sub_reg$pass_through, names.arg = sub_reg$regime,
+              col = "#1f4e79", border = NA,
+              ylab = "pass-through de LP (−β câmbio)",
+              main = "Pass-through cambial por regime",
+              ylim = range(0, sub_reg$pass_through, na.rm = TRUE) * 1.25)
+abline(h = tab_sub$pass_through[tab_sub$regime == "Amostra cheia"], lty = 2, col = "#c0392b")
+text(bp, sub_reg$pass_through, labels = round(sub_reg$pass_through, 2), pos = 3, cex = 0.85)
+legend("topright", lty = 2, col = "#c0392b", legend = "amostra cheia", bty = "n")
+```
+
+# 11. VECM com 5 dummies de intervenção
+
+```{r dummies-calc}
+## --- etapa 11: VECM com dummies determinísticas (dumvar no ca.jo) ---
+datas_modelo <- df$data
+dum_interv <- as.matrix(data.frame(
+  D_2008m10 = as.integer(format(datas_modelo, "%Y-%m") == "2008-10"),
+  D_2015m09 = as.integer(format(datas_modelo, "%Y-%m") == "2015-09"),
+  D_2016m01 = as.integer(format(datas_modelo, "%Y-%m") == "2016-01"),
+  D_2020m03 = as.integer(format(datas_modelo, "%Y-%m") == "2020-03"),
+  D_2020m08 = as.integer(format(datas_modelo, "%Y-%m") == "2020-08")
+))
+stopifnot(nrow(dum_interv) == nrow(Y))
+
+jo_trace_dum <- ca.jo(Y, type = "trace", K = K_opt, ecdet = "const",
+                      spec = "longrun", dumvar = dum_interv)
+rank_trace_dum_5 <- sum(jo_trace_dum@teststat > jo_trace_dum@cval[, "5pct"])
+rank_dum_usado   <- max(min(rank_trace_dum_5, ncol(Y) - 1), 1)
+
+vecm_dum_as_var <- vec2var(jo_trace_dum, r = rank_dum_usado)
+pt_vecm_dum     <- serial.test(vecm_dum_as_var, lags.pt = 12, type = "PT.adjusted")
+norm_vecm_dum   <- normality.test(vecm_dum_as_var)
+
+cat("Dummies: 2008-10, 2015-09, 2016-01, 2020-03, 2020-08\n")
+cat("Rank do traço a 5% (com dummies):", rank_trace_dum_5,
+    "| rank usado no vec2var:", rank_dum_usado, "\n")
+
+vecm_dum_fit <- cajorls(jo_trace_dum, r = rank_dum_usado)
+cat("\n===== Vetor(es) de cointegração (beta) — VECM com dummies =====\n")
+print(round(vecm_dum_fit$beta, 4))
+```
+
+```{r dummies-raw}
+cat("===== summary das equações do VECM com dummies (rlm) =====\n")
+summary(vecm_dum_fit$rlm)
+```
+
+```{r dummies-portmanteau}
+cat("===== Portmanteau ajustado (VECM com dummies), lags.pt = 12 =====\n")
+print(pt_vecm_dum$serial)
+cat("\n===== Jarque-Bera multivariado (VECM com dummies) =====\n")
+print(norm_vecm_dum$jb.mul)
+```
+
+# 12. VECM com IBC-Br (atividade real)
+
+```{r ibcbr-integracao}
+## --- etapa 12a: ordem de integração do log(IBC-Br) ---
+s_ibcbr <- df$log_ibcbr
+
+adf_ibc_trend <- ur.df(s_ibcbr,         type = "trend", selectlags = "AIC")
+adf_ibc_drift <- ur.df(diff(s_ibcbr),   type = "drift", selectlags = "AIC")
+kpss_ibc_n    <- ur.kpss(s_ibcbr,       type = "mu")
+kpss_ibc_d    <- ur.kpss(diff(s_ibcbr), type = "mu")
+
+cat("===== ADF log(IBC-Br) — nível (trend) =====\n");       summary(adf_ibc_trend)
+cat("\n===== ADF log(IBC-Br) — 1ª dif. (drift) =====\n");    summary(adf_ibc_drift)
+cat("\n===== KPSS log(IBC-Br) — nível =====\n");             summary(kpss_ibc_n)
+cat("\n===== KPSS log(IBC-Br) — 1ª dif. =====\n");           summary(kpss_ibc_d)
+```
+
+```{r ibcbr-modelo}
+## --- etapa 12b: sistema de 4 variáveis (IBC-Br endógeno) ---
+Y_ibc <- data.frame(
+  log_ipca_indice = s_ipca,
+  log_cambio      = s_cambio,
+  selic           = s_selic,
+  log_ibcbr       = s_ibcbr
+)
+
+var_sel_ibc <- VARselect(Y_ibc, lag.max = 12, type = "const")
+K_ibc       <- max(as.integer(var_sel_ibc$selection["AIC(n)"]), 2)
+cat("Defasagem AIC (sistema 4 variáveis): K =", K_ibc, "\n\n")
+print(var_sel_ibc$selection)
+
+jo_ibc         <- ca.jo(Y_ibc, type = "trace", K = K_ibc, ecdet = "const", spec = "longrun")
+rank_ibc       <- sum(jo_ibc@teststat > jo_ibc@cval[, "5pct"])
+rank_ibc_usado <- max(min(rank_ibc, ncol(Y_ibc) - 1), 1)
+
+cat("\nRank do traço a 5% (com IBC-Br):", rank_ibc,
+    "| rank usado:", rank_ibc_usado, "\n")
+```
+
+```{r ibcbr-johansen-raw}
+cat("===== Johansen por traço — sistema 4 variáveis (com IBC-Br) =====\n")
+summary(jo_ibc)
+```
+
+```{r ibcbr-vecm-pt}
+vecm_ibc_as_var <- vec2var(jo_ibc, r = rank_ibc_usado)
+pt_vecm_ibc     <- serial.test(vecm_ibc_as_var, lags.pt = 12, type = "PT.adjusted")
+
+# pass-through de longo prazo: beta_1 normalizado em log(IPCA)
+pt_coef <- function(jo, j = 1) {
+  b  <- jo@V[, j]; rn <- rownames(jo@V)
+  bi <- b[grep("^log_ipca",   rn)[1]]
+  bc <- b[grep("^log_cambio", rn)[1]]
+  as.numeric(-(bc / bi))
+}
+passthrough_ibc <- pt_coef(jo_ibc, 1)
+
+vecm_ibc_fit <- cajorls(jo_ibc, r = rank_ibc_usado)
+cat("===== Vetor(es) de cointegração (beta) — VECM com IBC-Br =====\n")
+print(round(vecm_ibc_fit$beta, 4))
+cat("\nPass-through de longo prazo (normalizado em log IPCA):",
+    round(passthrough_ibc, 3), "\n")
+
+cat("\n===== Portmanteau ajustado (VECM + IBC-Br), lags.pt = 12 =====\n")
+print(pt_vecm_ibc$serial)
+```
+
+```{r ibcbr-sem-selic}
+## --- etapa 12c: VECM + IBC-Br SEM Selic ---
+Y_sem <- data.frame(
+  log_ipca_indice = s_ipca,
+  log_cambio      = s_cambio,
+  log_ibcbr       = s_ibcbr
+)
+var_sel_sem    <- VARselect(Y_sem, lag.max = 12, type = "const")
+K_sem          <- max(as.integer(var_sel_sem$selection["AIC(n)"]), 2)
+jo_sem         <- ca.jo(Y_sem, type = "trace", K = K_sem, ecdet = "const", spec = "longrun")
+rank_sem       <- sum(jo_sem@teststat > jo_sem@cval[, "5pct"])
+rank_sem_usado <- max(min(rank_sem, ncol(Y_sem) - 1), 1)
+vecm_sem_as_var <- vec2var(jo_sem, r = rank_sem_usado)
+pt_vecm_sem     <- serial.test(vecm_sem_as_var, lags.pt = 12, type = "PT.adjusted")
+passthrough_sem <- pt_coef(jo_sem, 1)
+
+cat("Defasagem AIC (sem Selic): K =", K_sem,
+    "| rank do traço a 5%:", rank_sem, "| rank usado:", rank_sem_usado, "\n")
+cat("Pass-through (sem Selic):", round(passthrough_sem, 3), "\n\n")
+cat("===== Portmanteau ajustado (VECM + IBC-Br, sem Selic), lags.pt = 12 =====\n")
+print(pt_vecm_sem$serial)
+```
+
+## 12.1 Escada consolidada de Portmanteau
+
+```{r escada}
+## --- etapa 12d: escada completa de Portmanteau (lags.pt = 12) ---
+extrair_stat <- function(x) as.numeric(x$statistic)
+extrair_pval <- function(x) as.numeric(x$p.value)
+
+escada <- data.frame(
+  especificacao = c("VECM-base", "VECM com K = 6",
+                    "VECM + dummies de intervenção",
+                    "VECM + IBC-Br (atividade real)",
+                    "VECM + IBC-Br, sem Selic"),
+  k    = c(3, 3, 3, 4, 3),
+  rank = c(rank_coint, rank_coint, rank_dum_usado, rank_ibc_usado, rank_sem_usado),
+  portmanteau = round(c(extrair_stat(pt_vecm$serial),  extrair_stat(pt_vecm6$serial),
+                        extrair_stat(pt_vecm_dum$serial), extrair_stat(pt_vecm_ibc$serial),
+                        extrair_stat(pt_vecm_sem$serial)), 2),
+  p_valor = round(c(extrair_pval(pt_vecm$serial),  extrair_pval(pt_vecm6$serial),
+                    extrair_pval(pt_vecm_dum$serial), extrair_pval(pt_vecm_ibc$serial),
+                    extrair_pval(pt_vecm_sem$serial)), 4)
+)
+escada$diagnostico <- ifelse(escada$p_valor < 0.05,
+                             "rejeita ruido branco", "nao rejeita ruido branco")
+cat("===== Escada de Portmanteau ajustado (lags.pt = 12) por especificação =====\n")
+print(escada, row.names = FALSE)
+```
+
+# 13. Conferência dos números-chave
+
+```{r conferencia}
+## --- etapa 13: confirmação dos números que devem bater com o PDF final ---
+# Pass-through de longo prazo sob rank 1 (vetor único, IPCA = 1)
+vecm_r1 <- cajorls(jo_trace, r = 1)
+nm_cambio <- paste0("log_cambio.l", K_opt)
+pt_r1 <- -vecm_r1$beta[nm_cambio, 1]
+
+cat("---------------------------------------------------------------\n")
+cat("CONFERÊNCIA DE NÚMEROS-CHAVE (devem bater com o PDF final)\n")
+cat("---------------------------------------------------------------\n")
+cat(sprintf("Pass-through (rank 1, -beta câmbio)  : %.4f  [esperado ~0,503]\n", pt_r1))
+
+ts_trace <- jo_trace@teststat
+names(ts_trace) <- rownames(jo_trace@cval)
+cat(sprintf("Johansen traço r=0                   : %.2f  [esperado 75,87]\n",
+            ts_trace["r = 0"]))
+cat(sprintf("Johansen traço r<=1                  : %.2f  [esperado 22,67]\n",
+            ts_trace["r <= 1"]))
+cat(sprintf("Johansen traço r<=2                  : %.2f  [esperado 5,56]\n",
+            ts_trace["r <= 2"]))
+cat(sprintf("Portmanteau VECM-base (p-valor)      : %.4f  [esperado 0,0256]\n",
+            as.numeric(pt_vecm$serial$p.value)))
+cat("---------------------------------------------------------------\n")
+```
